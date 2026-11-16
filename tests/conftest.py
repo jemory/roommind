@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import os
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
+from homeassistant.core import CoreState
 from homeassistant.util import dt as dt_util
 
-from custom_components.roommind.control.mpc_controller import clear_command_cache
+from custom_components.roommind.const import DOMAIN
+from custom_components.roommind.coordinator import RoomMindCoordinator
 from custom_components.roommind.store import RoomMindStore
 
 
@@ -158,14 +161,6 @@ def make_mock_states_get(
     return _mock
 
 
-@pytest.fixture(autouse=True)
-def _clear_command_cache():
-    """Clear the module-level command cache between tests."""
-    clear_command_cache()
-    yield
-    clear_command_cache()
-
-
 @pytest.fixture
 def hass():
     """Return a mocked Home Assistant instance."""
@@ -197,3 +192,194 @@ def store(hass):
     s._store.async_load = AsyncMock(return_value=None)
     s._store.async_save = AsyncMock()
     return s
+
+
+# A Central Thermostat that reports its own reading and accepts a heat/cool band.
+THERMOSTAT_ENTITY = "climate.hall_thermostat"
+
+DEFAULT_THERMOSTAT_ATTRIBUTES: dict[str, Any] = {
+    "current_temperature": 20.0,
+    "hvac_modes": ["off", "heat", "cool", "heat_cool", "fan_only"],
+    "supported_features": 2,
+    "min_temp": 5.0,
+    "max_temp": 35.0,
+    "target_temp_step": 0.5,
+    "temperature": None,
+    "target_temp_low": 18.0,
+    "target_temp_high": 24.0,
+    "fan_modes": ["auto", "on"],
+    "fan_mode": "auto",
+    "hvac_action": "idle",
+}
+
+
+class FakeState:
+    """A minimal HA state object."""
+
+    def __init__(self, entity_id: str, state: str, attributes: dict[str, Any] | None = None) -> None:
+        self.entity_id = entity_id
+        self.state = state
+        self.attributes = dict(attributes or {})
+        self.last_changed = dt_util.utcnow()
+
+
+class FakeStates:
+    """A dict-backed ``hass.states``."""
+
+    def __init__(self) -> None:
+        self._states: dict[str, FakeState] = {}
+
+    def set(self, entity_id: str, state: str, attributes: dict[str, Any] | None = None) -> FakeState:
+        """Store one entity state and return it."""
+        self._states[entity_id] = FakeState(entity_id, state, attributes)
+        return self._states[entity_id]
+
+    def get(self, entity_id: str) -> FakeState | None:
+        """Return the stored state, or None."""
+        return self._states.get(entity_id)
+
+    def remove(self, entity_id: str) -> None:
+        """Forget one entity."""
+        self._states.pop(entity_id, None)
+
+
+class FakeRegistry:
+    """A dict-backed entity registry."""
+
+    def __init__(self) -> None:
+        self.entities: dict[str, Any] = {}
+        self.removed: list[str] = []
+
+    def async_get(self, entity_id: str) -> Any:
+        """Return the registered entry, or None."""
+        return self.entities.get(entity_id)
+
+    def async_remove(self, entity_id: str) -> None:
+        """Record and drop one entity."""
+        self.removed.append(entity_id)
+        self.entities.pop(entity_id, None)
+
+
+class Harness:
+    """One coordinator with a real store, wired to the fake Home Assistant."""
+
+    def __init__(self, hass: Any) -> None:
+        self.hass = hass
+        self.store = RoomMindStore(hass)
+        self.store._store = AsyncMock()
+        self.store._store.async_load = AsyncMock(return_value=None)
+        self.store._store.async_save = AsyncMock()
+        self.coordinator: RoomMindCoordinator | None = None
+
+    async def seed(
+        self,
+        rooms: dict[str, dict] | None = None,
+        settings: dict | None = None,
+        thermal_data: dict | None = None,
+        occupancy_trends: dict | None = None,
+    ) -> RoomMindCoordinator:
+        """Fill the store and build the coordinator (not yet refreshed)."""
+        await self.store.async_load()
+        for area_id, room in (rooms or {}).items():
+            await self.store.async_save_room(area_id, {"area_id": area_id, **room})
+        base_settings = {
+            "outdoor_temp_sensor": "sensor.outdoor_temp",
+            "central_plant": {"thermostat_entity": THERMOSTAT_ENTITY},
+        }
+        base_settings.update(settings or {})
+        await self.store.async_save_settings(base_settings)
+        await self.store.async_save_thermal_data(thermal_data or {})
+        await self.store.async_save_occupancy_trends(occupancy_trends or {})
+        self.hass.data[DOMAIN] = {"store": self.store}
+        with patch("homeassistant.helpers.frame.report_usage"):
+            self.coordinator = RoomMindCoordinator(self.hass, MagicMock())
+        self._wire_history(self.coordinator)
+        return self.coordinator
+
+    @staticmethod
+    def _wire_history(coordinator: RoomMindCoordinator) -> None:
+        """A history store that keeps its rows in memory (no /config files)."""
+        history = MagicMock()
+        history.read_detail.return_value = []
+        history.read_history.return_value = []
+        history.record = MagicMock()
+        history.rotate = MagicMock()
+        history.remove_room = MagicMock()
+        coordinator._history_store = history
+
+    async def cycle(self) -> dict:
+        """Run one control cycle."""
+        assert self.coordinator is not None
+        return await self.coordinator._async_update_data()
+
+
+def make_room(overrides: dict | None = None, **kwargs: Any) -> dict:
+    """A complete, valid indoor room configuration."""
+    room: dict[str, Any] = {
+        "temperature_sensor": "sensor.room_temp",
+        "humidity_sensor": "sensor.room_humidity",
+        "climate_mode": "auto",
+        "schedules": [],
+        "window_sensors": [],
+        "exterior_window_sensors": [],
+        "interior_door_sensors": [],
+        "occupancy_sensors": [],
+        "covers": [],
+        "read_only_covers": [],
+        "comfort_heat": 21.0,
+        "comfort_cool": 24.0,
+        "eco_heat": 17.0,
+        "eco_cool": 27.0,
+        "presence_persons": [],
+        "is_outdoor": False,
+        "climate_control_enabled": True,
+        "preheat_enabled": True,
+        "co2_sensor": "",
+        "voc_sensor": "",
+        "ventilation_entity": "",
+    }
+    room.update(overrides or {})
+    room.update(kwargs)
+    return room
+
+
+@pytest.fixture
+def fake_registry(monkeypatch) -> FakeRegistry:
+    """Install a dict-backed entity registry for the integration's helpers."""
+    registry = FakeRegistry()
+    monkeypatch.setattr("homeassistant.helpers.entity_registry.async_get", lambda hass: registry)
+    return registry
+
+
+@pytest.fixture
+def fake_states(hass) -> FakeStates:
+    """Install the dict-backed state machine on the mocked hass."""
+    states = FakeStates()
+    hass.states = states
+    return states
+
+
+@pytest.fixture
+def plant_hass(hass, fake_states, fake_registry) -> Any:
+    """A mocked hass that can run the whole Central Plant cycle."""
+    hass.services = MagicMock()
+    hass.services.async_call = AsyncMock(return_value={})
+    hass.bus = MagicMock()
+    hass.state = CoreState.running
+    hass.config.units = MagicMock()
+    hass.config.units.temperature_unit = "°C"
+    hass.config.latitude = 52.0
+    hass.config.longitude = 13.0
+    hass.config.time_zone = "UTC"
+    hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+    fake_states.set("sensor.outdoor_temp", "5.0", {"unit_of_measurement": "°C"})
+    fake_states.set("sensor.room_temp", "18.0", {"unit_of_measurement": "°C"})
+    fake_states.set("sensor.room_humidity", "55.0")
+    fake_states.set(THERMOSTAT_ENTITY, "heat", dict(DEFAULT_THERMOSTAT_ATTRIBUTES))
+    return hass
+
+
+@pytest.fixture
+def harness(plant_hass) -> Harness:
+    """A coordinator harness sharing the fake hass."""
+    return Harness(plant_hass)

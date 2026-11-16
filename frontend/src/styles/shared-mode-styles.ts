@@ -37,6 +37,14 @@ export const modeStyles = css`
     background: var(--rs-cool);
   }
 
+  .mode-circulating {
+    color: var(--rs-ok-text);
+    background: color-mix(in srgb, var(--rs-ok) 12%, transparent);
+  }
+  .mode-circulating .mode-dot {
+    background: var(--rs-ok);
+  }
+
   .mode-idle {
     color: var(--secondary-text-color, #757575);
     background: color-mix(in srgb, var(--secondary-text-color) 5%, transparent);

@@ -63,6 +63,11 @@ export class RsAnalyticsSummary extends LitElement {
                   ? this._runTile("cool", s.cooling_hours, s.cooling_starts, s.cool_overshoot)
                   : nothing
               }
+              ${
+                (s.circulating_hours ?? 0) > 0 || (s.circulate_starts ?? 0) > 0
+                  ? this._circulationTile(s)
+                  : nothing
+              }
               ${this.hasWindowSensor || s.window_hours > 0 ? this._windowTile(s) : nothing}
               ${s.price && this.showPrice ? this._priceTiles(s.price) : nothing}
             </div>
@@ -197,6 +202,31 @@ export class RsAnalyticsSummary extends LitElement {
       ${this._strip(
         timeSpans(this.points, (p) => p.mode === mode),
         kind === "heat" ? "var(--rs-heat)" : "var(--rs-cool)",
+      )}
+    </rs-stat-tile>`;
+  }
+
+  /** House-wide circulation hours and starts (Central HVAC). */
+  private _circulationTile(s: AnalyticsStats) {
+    const l = this.language;
+    const starts = s.circulate_starts ?? 0;
+    const parts =
+      starts > 0
+        ? [
+            localize(starts === 1 ? "analytics.run" : "analytics.runs", l, {
+              count: formatNumber(starts, this.hass),
+            }),
+          ]
+        : [];
+    return html`<rs-stat-tile
+      icon="mdi:fan"
+      .label=${localize("analytics.summary.circulating", l)}
+      .value=${formatHours(s.circulating_hours ?? 0, l)}
+      .sub=${parts.join(" · ")}
+    >
+      ${this._strip(
+        timeSpans(this.points, (p) => p.mode === "circulating" || !!p.fan_circulating),
+        "var(--secondary-text-color)",
       )}
     </rs-stat-tile>`;
   }

@@ -1,6 +1,12 @@
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import type { HomeAssistant, PriceStatus, RoomConfig, RoomWithoutArea } from "./types";
+import type {
+  CentralPlantLive,
+  HomeAssistant,
+  PriceStatus,
+  RoomConfig,
+  RoomWithoutArea,
+} from "./types";
 import { loadHaElements } from "./load-ha-elements";
 import { noteServerTime } from "./utils/server-clock";
 import { localize } from "./utils/localize";
@@ -76,11 +82,8 @@ export class RoomMindPanel extends LitElement {
   @state() private _presenceEnabled = false;
   @state() private _priceEntity = "";
   @state() private _priceStatus: PriceStatus | null = null;
-  @state() private _valveProtectionEnabled = false;
-  @state() private _coilDryEnabled = false;
-  @state() private _coilDryMinutes = 20;
-  @state() private _coilDryMode = "fan_only";
-  @state() private _coilDryFanMode = "low";
+  /** Live Central Plant status; null until the backend reports it. */
+  @state() private _centralPlant: CentralPlantLive | null = null;
   @state() private _anyoneHome = true;
   @state() private _presencePersons: string[] = [];
   @state() private _presenceAwayAction: "eco" | "off" = "eco";
@@ -540,15 +543,11 @@ export class RoomMindPanel extends LitElement {
             .climateControlActive=${this._climateControlActive}
             .scheduleOffAction=${this._scheduleOffAction}
             .presenceAwayAction=${this._presenceAwayAction}
-            .valveProtectionEnabled=${this._valveProtectionEnabled}
             .controlMode=${this._controlMode}
-            .coilDryEnabled=${this._coilDryEnabled}
-            .coilDryMinutes=${this._coilDryMinutes}
-            .coilDryMode=${this._coilDryMode}
-            .coilDryFanMode=${this._coilDryFanMode}
             .outdoorTemp=${this._outdoorTemp}
             .vacationActive=${this._vacationActive}
             .vacationUntil=${this._vacationUntil}
+            .centralPlant=${this._centralPlant}
             @room-updated=${this._onRoomUpdated}
             @room-deleted=${this._onRoomDeleted}
             @open-analytics=${this._onGoToAnalytics}
@@ -599,9 +598,11 @@ export class RoomMindPanel extends LitElement {
       .controlMode=${common.controlMode}
       .climateControlActive=${common.climateControlActive}
       .summary=${summary}
+      .centralPlant=${this._centralPlant}
       @area-selected=${this._onAreaSelected}
       @room-updated=${this._onRoomUpdated}
       @edit-requested=${this._startEditing}
+      @open-settings=${this._onOpenSettings}
     ></rs-dashboard>`;
   }
 
@@ -683,15 +684,11 @@ export class RoomMindPanel extends LitElement {
         presence_enabled: boolean;
         price_entity?: string;
         price_status?: PriceStatus | null;
+        central_plant?: CentralPlantLive | null;
         anyone_home: boolean;
         presence_persons: string[];
         presence_away_action: "eco" | "off";
         schedule_off_action: "eco" | "off";
-        valve_protection_enabled: boolean;
-        coil_dry_enabled: boolean;
-        coil_dry_minutes: number;
-        coil_dry_mode: string;
-        coil_dry_fan_mode: string;
         server_time?: number;
       }>({
         type: "roommind/rooms/list",
@@ -716,11 +713,7 @@ export class RoomMindPanel extends LitElement {
       this._presenceEnabled = result.presence_enabled ?? false;
       this._priceEntity = result.price_entity ?? "";
       this._priceStatus = result.price_status ?? null;
-      this._valveProtectionEnabled = result.valve_protection_enabled ?? false;
-      this._coilDryEnabled = result.coil_dry_enabled ?? false;
-      this._coilDryMinutes = result.coil_dry_minutes ?? 20;
-      this._coilDryMode = result.coil_dry_mode ?? "fan_only";
-      this._coilDryFanMode = result.coil_dry_fan_mode ?? "low";
+      this._centralPlant = result.central_plant ?? null;
       this._anyoneHome = result.anyone_home ?? true;
       this._presencePersons = result.presence_persons ?? [];
       this._presenceAwayAction = result.presence_away_action ?? "eco";

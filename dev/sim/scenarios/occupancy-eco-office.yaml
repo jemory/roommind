@@ -1,55 +1,84 @@
 name: occupancy-eco-office
 description: >
-  Office with a motion sensor and no schedule (comfort around the clock), occupancy eco on
-  with a 15 min delay. The room must sit at eco while nobody is in it, follow comfort once
-  someone is, and ride out a 10 min absence without dropping to eco (#180).
+  Office with a PIR and no schedule (comfort around the clock) in a house run by one
+  Central Plant, occupancy mode reactive_and_trend with a 15 min delay. The room must sit
+  at eco while nobody is in it, follow comfort once someone is, and ride out a 10 min
+  absence without dropping to eco (#180). Base for the air-quality scenario.
 refs: [180]
-tags: [trv, presence]
+tags: [central-plant, occupancy]
 start: 2026-01-12T00:00
 duration: 3d
-location: {latitude: 52.5, longitude: 13.4, time_zone: Europe/Berlin}
+location: {latitude: 40.7, longitude: -74.0, time_zone: America/New_York, unit_system: us_customary, country: US}
 weather: {profile: temperate}
 house:
-  building: bestand_teilsaniert
-  outdoor: {sensors: {temperature: sensor.aussen_temp}}
+  building: us_wood_frame
+  floors: {ground: Ground floor, upper: Upstairs}
+  outdoor: {sensors: {temperature: sensor.outdoor_temp}}
   rooms:
-    buero:
-      name: Büro
+    living_room:
+      name: Living room
+      floor: ground
+      floor_area_m2: 32
+      exterior_wall_m2: 20
+      initial: {temperature: 19.0}
+      windows: [{orientation: S, area_m2: 4, g_value: 0.6}]
+      devices:
+        - {entity_id: climate.central_hvac, profile: central_furnace_hp, heat_capacity_w: 7000, serves_rooms: [office], supply_shares: {living_room: 0.65, office: 0.35}}
+      sensors:
+        temperature: {entity_id: sensor.living_room_temp}
+        occupancy: {entity_id: binary_sensor.living_room_presence}
+    office:
+      name: Office
+      floor: upper
       floor_area_m2: 12
       exterior_wall_m2: 8
       initial: {temperature: 19.0}
       windows: [{orientation: E, area_m2: 1.5}]
-      devices:
-        - {entity_id: climate.buero_trv, profile: generic_trv}
-        - {entity_id: climate.kessel, profile: generic_boiler}
       sensors:
-        temperature: {entity_id: sensor.buero_temp}
-        occupancy: {entity_id: binary_sensor.buero_praesenz}
+        temperature: {entity_id: sensor.office_temp}
+        occupancy: {entity_id: binary_sensor.office_presence}
 people:
-  - {id: ben, profile: home_office, rooms: {office: buero}}
+  - id: ben
+    plan:
+      presence: {weekday: ["home@00:00"], weekend: ["home@00:00"]}
+      rooms: {office: "08:30-17:00", living: "default"}
+    rooms: {office: office, living: living_room}
 roommind:
   settings:
-    outdoor_temp_sensor: sensor.aussen_temp
+    outdoor_temp_sensor: sensor.outdoor_temp
     weather_entity: weather.simhome
-    control_mode: mpc
-    compressor_groups:
-      - {id: kessel, name: Kessel, members: [climate.buero_trv], master_entity: climate.kessel, min_run_minutes: 5, min_off_minutes: 5}
+    central_plant:
+      thermostat_entity: climate.central_hvac
+      nudge_delta_c: 1.5
+      max_nudge_headroom_c: 3.0
+      fallback_heat_c: 16.5
+      fallback_cool_c: 27.0
+      min_deadband_c: 2.5
+      min_run_minutes: 10
+      min_off_minutes: 5
+      exterior_open_policy: pause_unless_door_closed
   rooms:
-    buero:
-      devices: [{entity_id: climate.buero_trv, type: trv, heating_system_type: radiator}]
-      temperature_sensor: sensor.buero_temp
-      occupancy_sensors: [binary_sensor.buero_praesenz]
-      occupancy_eco_enabled: true
+    living_room:
+      temperature_sensor: sensor.living_room_temp
+      occupancy_sensors: [binary_sensor.living_room_presence]
+      climate_mode: heat_only
+      comfort_heat: 21.0
+      eco_heat: 18.0
+    office:
+      temperature_sensor: sensor.office_temp
+      occupancy_sensors: [binary_sensor.office_presence]
+      occupancy_mode: reactive_and_trend
       occupancy_eco_delay: 15
       climate_mode: heat_only
-      comfort_temp: 21.0
-      eco_temp: 17.0
+      comfort_heat: 21.0
+      eco_heat: 17.0
 timeline:
-  - {at: "+1d11h", do: occupancy.set, room: buero, count: 0, for: 10m}
+  - {at: "+1d11h", do: occupancy.set, room: office, count: 0, for: 10m}
 expect:
   - {invariant: no_rejected_commands}
   - {invariant: target_never_empty}
-  - {check: "room.buero.occupancy_vacant == true and room.buero.target_temp == 17.0", at: "+0d03h", label: empty at night -> eco}
-  - {check: "room.buero.occupancy_vacant == false and room.buero.target_temp == 21.0", at: "+0d10h", label: occupied -> comfort}
-  - {check: "room.buero.target_temp == 21.0", at: "+1d11h09m", label: short absence bridged by the delay}
-  - {check: "room.buero.occupancy_vacant == true and room.buero.target_temp == 17.0", at: "+1d18h", label: after work -> eco}
+  - {invariant: setpoints_within_device_range}
+  - {check: "room.office.occupancy_vacant == true and room.office.heat_target == 17.0", at: "+0d03h", label: empty at night -> eco}
+  - {check: "room.office.occupancy_vacant == false and room.office.heat_target == 21.0", at: "+0d10h", label: occupied -> comfort}
+  - {check: "room.office.heat_target == 21.0", at: "+1d11h09m", label: short absence bridged by the delay}
+  - {check: "room.office.occupancy_vacant == true and room.office.heat_target == 17.0", at: "+1d18h", label: after work -> eco}

@@ -1,51 +1,77 @@
 name: mold-bathroom
 description: >
-  Small north-facing bathroom, daily showers, cold outside. Mold detection must raise
-  the risk after showers and prevention must lift the target temperature.
-tags: [mold, humidity]
+  Small north-facing bathroom, daily showers, cold outside, in a house run by one Central
+  Plant that also serves the bathroom's duct. Mold detection must raise the risk after
+  showers and prevention must lift the room's target, which the plant then has to follow.
+tags: [mold, humidity, central-plant]
 refs: [218]
 start: 2026-01-12T00:00
 duration: 3d
-location: {latitude: 52.5, longitude: 13.4, time_zone: Europe/Berlin}
+location: {latitude: 40.7, longitude: -74.0, time_zone: America/New_York, unit_system: us_customary, country: US}
 weather: {profile: winter-cold}
 house:
-  building: altbau_unsaniert
+  building: us_wood_frame
+  floors: {ground: Ground floor, upper: Upstairs}
   outdoor:
-    sensors: {temperature: sensor.aussen_temp, humidity: sensor.aussen_feuchte}
+    sensors: {temperature: sensor.outdoor_temp, humidity: sensor.outdoor_humidity}
   rooms:
-    bad:
-      name: Bad
+    living_room:
+      name: Living room
+      floor: ground
+      floor_area_m2: 30
+      exterior_wall_m2: 18
+      initial: {temperature: 20.0}
+      devices:
+        - {entity_id: climate.central_hvac, profile: central_furnace_hp, heat_capacity_w: 8000, serves_rooms: [bathroom], supply_shares: {living_room: 0.8, bathroom: 0.2}}
+      sensors: {temperature: {entity_id: sensor.living_room_temp}}
+    bathroom:
+      name: Bathroom
+      floor: upper
       floor_area_m2: 6
       exterior_wall_m2: 7
       initial: {temperature: 20.0, humidity: 60}
-      windows: [{orientation: N, area_m2: 0.6, sensor: binary_sensor.bad_fenster}]
-      devices: [{entity_id: climate.bad_trv, profile: generic_trv}]
+      windows: [{orientation: N, area_m2: 0.6, sensor: binary_sensor.bathroom_window}]
       sensors:
-        temperature: {entity_id: sensor.bad_temp}
-        humidity: {entity_id: sensor.bad_feuchte}
+        temperature: {entity_id: sensor.bathroom_temp}
+        humidity: {entity_id: sensor.bathroom_humidity}
 roommind:
   settings:
-    outdoor_temp_sensor: sensor.aussen_temp
-    outdoor_humidity_sensor: sensor.aussen_feuchte
+    outdoor_temp_sensor: sensor.outdoor_temp
+    outdoor_humidity_sensor: sensor.outdoor_humidity
     mold_detection_enabled: true
     mold_prevention_enabled: true
     mold_prevention_intensity: medium
+    weather_entity: weather.simhome
+    central_plant:
+      thermostat_entity: climate.central_hvac
+      nudge_delta_c: 1.5
+      max_nudge_headroom_c: 3.0
+      fallback_heat_c: 16.5
+      fallback_cool_c: 27.0
+      min_deadband_c: 2.5
+      min_run_minutes: 10
+      min_off_minutes: 5
+      exterior_open_policy: pause_unless_door_closed
   rooms:
-    bad:
-      devices: [{entity_id: climate.bad_trv, type: trv, heating_system_type: radiator}]
-      temperature_sensor: sensor.bad_temp
-      humidity_sensor: sensor.bad_feuchte
-      window_sensors: [binary_sensor.bad_fenster]
+    living_room:
+      temperature_sensor: sensor.living_room_temp
       climate_mode: heat_only
-      comfort_temp: 21.0
-      eco_temp: 19.0
+      comfort_heat: 21.0
+      eco_heat: 18.0
+    bathroom:
+      temperature_sensor: sensor.bathroom_temp
+      humidity_sensor: sensor.bathroom_humidity
+      exterior_window_sensors: [binary_sensor.bathroom_window]
+      climate_mode: heat_only
+      comfort_heat: 21.0
+      eco_heat: 19.0
 timeline:
-  - {at: "+0d07h", do: humidity.event, room: bad, grams: 450, for: 15m}
-  - {at: "+1d07h", do: humidity.event, room: bad, grams: 450, for: 15m}
-  - {at: "+1d07h20m", do: window.open, entity_id: binary_sensor.bad_fenster, for: 10m}
-  - {at: "+2d07h", do: humidity.event, room: bad, grams: 450, for: 15m}
+  - {at: "+0d07h", do: humidity.event, room: bathroom, grams: 450, for: 15m}
+  - {at: "+1d07h", do: humidity.event, room: bathroom, grams: 450, for: 15m}
+  - {at: "+1d07h20m", do: window.open, entity_id: binary_sensor.bathroom_window, for: 10m}
+  - {at: "+2d07h", do: humidity.event, room: bathroom, grams: 450, for: 15m}
 expect:
-  - {check: "room.bad.mold_risk_level != 'ok'", at: "+0d07h45m", label: risk raised after shower}
-  - {check: "room.bad.mold_prevention_active == true", at: "+0d07h25m", label: prevention active after the first shower}
-  - {check: "room.bad.mold_boost > 0 and room.bad.target_reason == ''", at: "+0d07h25m", label: mold boost recorded for the analytics chart (#218)}
-  - {check: "room.bad.mold_prevention_active == true or room.bad.mold_surface_rh < 65", at: "+0d07h50m", label: prevention keeps its 5 % hysteresis}
+  - {check: "room.bathroom.mold_risk_level != 'ok'", at: "+0d07h45m", label: risk raised after shower}
+  - {check: "room.bathroom.mold_prevention_active == true", at: "+0d07h25m", label: prevention active after the first shower}
+  - {check: "room.bathroom.mold_boost > 0 and room.bathroom.target_reason == ''", at: "+0d07h25m", label: mold boost recorded for the analytics chart (#218)}
+  - {check: "room.bathroom.mold_prevention_active == true or room.bathroom.mold_surface_rh < 65", at: "+0d07h50m", label: prevention keeps its 5 % hysteresis}

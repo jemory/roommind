@@ -2,7 +2,7 @@
 
 # RoomMind
 
-**Room-by-room climate control for Home Assistant that learns how your home heats and cools.**
+**Whole-home predictive Central HVAC control for Home Assistant — one thermostat, every room.**
 
 [![Home Assistant Marketplace](https://img.shields.io/badge/Marketplace-Default-orange.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=snazzybean&repository=roommind&category=integration)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.5%2B-blue.svg)](https://www.home-assistant.io/)
@@ -16,31 +16,32 @@
 
 </div>
 
-RoomMind turns the thermostats, radiator valves and air conditioners you already have into one controller per room. It learns how quickly each room warms up, cools down and reacts to the sun, then plans ahead: the room is warm when the schedule says so and heating stops before it overshoots. You set it up in its own panel in Home Assistant, without YAML, and everything runs locally.
+RoomMind runs the **Central Plant** of a ducted forced-air home from Home Assistant: a gas or electric **furnace** for heating, an air-source **heat pump** for cooling, and the central blower for Circulation — all behind one Wi-Fi **Central Thermostat**. No TRVs, no minisplits: RoomMind learns each **Thermal Zone** with its own Extended Kalman Filter, weighs rooms by **Room Priority**, and decides block by block whether the plant should heat, cool, circulate or idle.
 
-- 🎯 **Warm on time.** Heats ahead of the next schedule block and stops early enough for the radiator's afterglow.
-- 🔌 **Works with your devices.** Any `climate` entity: radiator valves, ACs, heat pumps, underfloor heating, also mixed in one room.
-- 🧭 **Set up in minutes.** Rooms, schedules and settings in one panel, plus a card for any dashboard.
-- 📊 **Shows its work.** How well each room held its target, how long it heated and what the model has learned.
+- 🎯 **The right room, on time.** Occupancy-driven **Room Priority** and learned **Occupancy Trends** warm the office before you sit down and leave the guest room on its **Guardrail Band**.
+- 🌀 **Mix instead of over-condition.** When one room is too warm and another too cool, **Circulation** with the blower alone can equalize them for a fraction of the furnace's or compressor's energy.
+- 🌡️ **Comfort, not just dry-bulb.** **Effective Temperature** accounts for humidity; **Wet-Coil Lockout** keeps a wet evaporator from blowing moisture back into the rooms.
+- 🚪 **Openings that make sense.** An open window pauses the whole home; a closed **Interior Door** turns that into a local problem so the rest of the house keeps heating.
+- 🧭 **Set up in minutes.** Pick the Central Thermostat, add rooms and sensors. Everything runs locally, no cloud.
 
 ## Screenshots
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/dashboard.png" alt="Room overview with live state, curve of the last hours and quick override per room"></td>
-    <td width="50%"><img src="docs/images/room.png" alt="Room page with target, override, schedule, devices and sensors"></td>
+    <td width="50%"><img src="docs/images/dashboard.png" alt="Room overview with live state, plant action and quick override per room"></td>
+    <td width="50%"><img src="docs/images/room.png" alt="Room page with target, override, schedule, sensors and shades"></td>
   </tr>
   <tr>
-    <td align="center"><b>Rooms</b><br>Every room at a glance, with a quick override</td>
-    <td align="center"><b>Room page</b><br>Target, schedule, devices and sensors in one place</td>
+    <td align="center"><b>Rooms</b><br>Every Thermal Zone at a glance, with the plant's action and a quick override</td>
+    <td align="center"><b>Room page</b><br>Target, schedule, sensors and shades in one place</td>
   </tr>
   <tr>
     <td><img src="docs/images/schedule.png" alt="Schedule editor with a week grid"></td>
-    <td><img src="docs/images/analytics.png" alt="Analytics chart with temperature, target, outdoor temperature, humidity and electricity price"></td>
+    <td><img src="docs/images/analytics.png" alt="Analytics chart with temperature, target, outdoor temperature, humidity, price and effective temperature"></td>
   </tr>
   <tr>
     <td align="center"><b>Schedule editor</b><br>Draw blocks on a week grid</td>
-    <td align="center"><b>Analytics</b><br>History, time on target, daily rhythm, learned model</td>
+    <td align="center"><b>Analytics</b><br>History, time on target, daily rhythm, circulation, learned model</td>
   </tr>
 </table>
 
@@ -50,32 +51,36 @@ RoomMind turns the thermostats, radiator valves and air conditioners you already
 
 <table>
   <tr>
-    <td>🧠 <b>Control</b></td>
-    <td>Self-learning model per room with predictive control · pre-heating and pre-cooling before a schedule block · learned radiator afterglow · proportional setpoints or direct valve control for TRVs · solar gain from sun position and weather</td>
+    <td>🏠 <b>Central Plant</b></td>
+    <td>One Central Thermostat drives furnace heating, heat-pump cooling and blower Circulation · bounded Setpoint Nudging just past the thermostat's own reading · Fallback Band left on the thermostat while idle · plant guards for minimum run, minimum off, minimum fan and changeover</td>
   </tr>
   <tr>
-    <td>📅 <b>Schedules &amp; targets</b></td>
-    <td>Schedule editor on a week grid · several schedules per room with a switch · comfort and eco, separate heating and cooling targets · temporary override · presence, empty room and vacation · optional: take over a temperature set on the TRV dial or AC remote</td>
+    <td>🧠 <b>Per-room models</b></td>
+    <td>An Extended Kalman Filter per Thermal Zone against the House Reference Temperature: heat loss, furnace and heat-pump response, solar gain and learned Circulation mixing (<code>beta_fan</code>) · predictive whole-home MPC over <code>idle</code>, <code>heating</code>, <code>cooling</code> and <code>circulating</code> · on/off control while the models are still learning</td>
   </tr>
   <tr>
-    <td>🔥 <b>Devices</b></td>
-    <td>TRVs, ACs, heat pumps, underfloor heating · heat source selection between radiators and AC · compressor groups for multi-split units · idle as off, fan only or setback · proportional or direct setpoint per device</td>
+    <td>👥 <b>Occupancy &amp; priority</b></td>
+    <td>Occupancy-Driven Room Priority from motion, presence and schedule · learned Occupancy Trends by day type and time of day · dwell filtering · the sleeping-PIR mode <code>schedule_assumed_when_on</code> · Guardrail Band for empty rooms</td>
   </tr>
   <tr>
-    <td>🏠 <b>Around the room</b></td>
-    <td>Pause while a window is open · cover shading, night close and cover schedules · mold risk with notifications and prevention · CO₂/VOC with ventilation control · electricity price shifts the target · valve protection</td>
+    <td>💧 <b>Humidity comfort</b></td>
+    <td>Effective Temperature instead of dry-bulb alone · dehumidifying by cooling slightly past the target · Wet-Coil Lockout so Circulation never re-evaporates the wet evaporator into the supply air</td>
+  </tr>
+  <tr>
+    <td>🚪 <b>Openings &amp; shades</b></td>
+    <td>Whole-home gate for Exterior Openings with a policy that respects a shut Interior Door · interior-door airflow factors · Whole-Home Coordinated Window Shades: solar shading, night close, cover schedules and read-only covers</td>
   </tr>
   <tr>
     <td>📊 <b>Insight</b></td>
-    <td>Analytics page · <a href="#dashboard-card">dashboard card</a> · <a href="#room-climate-entity">room climate entity</a> for automations, thermostat cards and voice assistants · English, German, French and Italian</td>
+    <td>Analytics page with effective temperature, circulation periods, comfort, price and the learned model · <a href="#dashboard-card">dashboard card</a> · <a href="#room-climate-entity">room climate entity</a> for automations, thermostat cards and voice assistants · English, German, French and Italian</td>
   </tr>
 </table>
 
-Every feature in detail: [docs/features.md](docs/features.md). Device types, setpoint modes and the `Priority` slider: [Control and Device Guide](docs/control-and-devices.md).
+Every feature in detail: [docs/features.md](docs/features.md). Configuring the thermostat, nudging and plant guards: [Central Plant Guide](docs/control-and-devices.md).
 
 ## Installation
 
-[![Open your Home Assistant instance and open RoomMind in the Marketplace.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=snazzybean&repository=roommind&category=integration)
+[![Open your Home Assistant instance and open RoomMind in the Marketplace.](https://my.home-assistant.io/redirect/hacs_repository/?owner=snazzybean&repository=roommind&category=integration)](https://my.home-assistant.io/redirect/hacs_repository/?owner=snazzybean&repository=roommind&category=integration)
 
 1. Open the **Marketplace** in Home Assistant (formerly HACS), search for **RoomMind** and install it
 2. Restart Home Assistant
@@ -94,24 +99,24 @@ Every feature in detail: [docs/features.md](docs/features.md). Device types, set
 
 RoomMind appears as a panel in the sidebar (for administrators) and shows every Home Assistant area as a room.
 
-1. **Open a room** from the overview
-2. **Add a device**: at least one thermostat, radiator valve or AC (`climate.*`)
-3. **Add a temperature sensor** (recommended): RoomMind then decides itself when to heat, see [Full Control vs. Managed Mode](#full-control-vs-managed-mode)
-4. **Add a schedule**: create one right in RoomMind or pick an existing schedule helper
-5. **Set comfort and eco**: comfort while the schedule is on, eco while it is off
+1. **Pick the Central Thermostat**: `Settings → Central HVAC → Central thermostat`. It must be the `climate.*` entity that really runs the furnace, the heat pump and the blower. RoomMind nudges its setpoint and reads its `hvac_action` and `fan_mode`; it never needs a second thermostat.
+2. **Set the thermostat's area** so RoomMind knows where the wall unit measures the House Reference Temperature.
+3. **Add a temperature sensor per room** (recommended). A room with its own sensor is a full Thermal Zone: it gets the learned model, occupancy priority and its own share of the plant's air.
+4. **Add a schedule per room**, or pick an existing schedule helper. Blocks decide when comfort applies.
+5. **Set comfort and eco** for heating and cooling, and set the **Fallback Band** (heating floor / cooling ceiling) that stays on the thermostat while the plant is idle.
 
 RoomMind starts controlling right away.
 
-**The first hours.** Until the model knows the room, RoomMind uses plain on/off control and learns in the background. It needs about three hours without and one hour with heating (or cooling) and switches to predictive control by itself once its forecasts are reliable, usually on the first day. Rooms that rarely heat take longer. The model card on the analytics page shows how far it is.
+**The first hours.** Until the per-room filters know the rooms, RoomMind runs the plant in a safe on/off pattern and learns in the background. It needs about three hours of data without and one hour with heating or cooling per room, and hands rooms to the predictive plan one by one as their forecasts become reliable, usually on the first day. The model card on the analytics page shows how far each room is.
 
 > [!TIP]
-> **Plug-in heaters and other devices without a thermostat entity:** create a [Generic Thermostat](https://www.home-assistant.io/integrations/generic_thermostat/) for the switch and add that `climate` entity to the room.
+> **Which thermostat?** The one wired to the air handler — not a smart TRV and not a minisplit remote. If your furnace is controlled by a plain relay, create a [Generic Thermostat](https://www.home-assistant.io/integrations/generic_thermostat/) for it and pick that `climate` entity.
 
 ## Dashboard Card
 
 Put a RoomMind room on any dashboard: Edit dashboard → Add card → **RoomMind room**. The card ships with the integration, no resource needs to be added. After installing or updating RoomMind, reload the browser tab (or restart the companion app) once so the card is found.
 
-It shows the room's temperature, target, humidity and what RoomMind is doing, plus:
+It shows the room's temperature, target, humidity and what the plant is doing with that room, plus:
 
 - **Temporary override**: Comfort, Eco or a custom temperature for 1, 2 or 4 hours, with the time left. Tap the active one to end it.
 - **Mode**: Auto, Heat only or Cool only, same as in the panel
@@ -137,40 +142,60 @@ hide_temperatures: false
 
 ## How It Works
 
+### One Central Plant, many Thermal Zones
+
+A ducted forced-air system conditions every open register at once. RoomMind therefore plans the plant as a whole: each block it advances every Thermal Zone and the House Reference Temperature together over the four plant actions — `idle`, `heating`, `cooling` and `circulating` — and scores them by Room Priority weighted comfort, Guardrail Band safety, wrong-way over-conditioning and energy. That is how the plan can tell that heating one more degree for a warm room would push a cool one over its ceiling, or that the blower alone would fix both.
+
+Rooms are never commanded individually. There is one lever — the Central Thermostat — and RoomMind moves it.
+
 ### Target Temperature Priority
 
 ```
-Manual Override > Vacation > Presence Away > Schedule Block > Comfort / Eco  (+Mold Delta)
+Manual Override > Thermostat Override > Vacation > Presence Away > Schedule Block > Comfort / Eco  (+ Mold Delta)
 ```
 
-"Eco when the room is empty" lowers the schedule result to eco while the room is empty; override, vacation and presence away still take priority. The electricity price can move the schedule target by up to 2 °C, never an override, vacation or absence.
+"Eco when the room is empty" lowers the result to eco while the room is empty; override, vacation and presence away still take priority. The electricity price can move the **cooling** target by up to 2 °C (heating too if you opt in), never an override, vacation or absence.
 
-### Full Control vs. Managed Mode
+### Setpoint Nudge and Fallback Band
 
-An external temperature sensor is where RoomMind really starts to shine. It is the single most useful addition for any room: it unlocks the thermal model, predictive control and proportional device control.
+RoomMind does not send a room's target temperature to the thermostat. It sends a bounded **Setpoint Nudge**: a temporary shift of the thermostat's active heating or cooling setpoint just past the thermostat's own reading, enough to start or sustain a call for the rooms further down the duct. When the plant is idle or only circulating, the thermostat is parked in a neutral **Fallback Band** (a `heat_cool` range where supported) so it keeps protecting the home on its own if Home Assistant or Wi-Fi goes offline.
 
-| | Full Control | Managed Mode |
-|---|---|---|
-| **When** | External temperature sensor assigned | No external sensor |
-| **How** | RoomMind decides heating/cooling/idle | Device self-regulates |
-| **Setpoints** | Proportional boost (e.g. 28°C to force heating at 80% power) | Exact target sent to device |
-| **Thermal model** | EKF learns room behavior, MPC optimizes | No learning, no optimization |
+Why not just send the target: the thermostat senses temperature in one hallway. Sending a remote room's target fails to start a call whenever the hallway is already satisfied, and extreme setpoint shifts or `hvac_mode: off` risk thermal runaway or freeze damage.
 
-In **Full Control**, RoomMind calculates device setpoints from the planned heating power. Instead of sending 22°C to a TRV or AC, it might send 28°C to make the device heat at full capacity. This solves common issues where devices with inaccurate internal sensors or built-in deadbands refuse to turn on. Each room shows its current mode ("Full Control" or "Managed") on the room page.
+### Per-room models and the House Reference Temperature
 
-### Predictive Control
+Each Thermal Zone has its own Extended Kalman Filter. It learns the room's heat loss against outdoor air, its response to furnace heating and heat-pump cooling, its solar gain — and its coupling to the **House Reference Temperature**, both passive (`beta_f`) and while the blower mixes air through the ducts (`beta_fan`). Coupling every room to one live house temperature keeps estimation decoupled and identifiable from room thermistors alone.
 
-An Extended Kalman Filter watches the room temperature and learns each room's heat loss, heating and cooling power and response to sun and occupancy. Once its forecasts are good enough (prediction accuracy better than 0.5 °C), the optimizer plans the next hours and calculates how much power the room needs. Until then RoomMind uses on/off control with hysteresis (see [The first hours](#getting-started)).
+### Occupancy-Driven Room Priority and Occupancy Trends
 
-`Settings → Control → Control Mode` decides whether predictive control is used at all. **Intelligent (MPC)** is the default. **Simple** keeps every room on on/off control with hysteresis; the model still learns in the background and feeds the analytics prediction, but it never makes heating or cooling decisions. Automatic blinds then shade from a simpler solar estimate instead of the forecast.
+Motion and presence sensors say who is where right now; a learned **Occupancy Trend** says where people usually are at this hour on this kind of day. Together they set a room's Room Priority weight: an occupied or soon-to-be-occupied room drives comfort cycles, an empty room only carries its Guardrail Band. Dwell filtering bridges short absences, and the sleeping-PIR mode `schedule_assumed_when_on` lets a bedroom keep its sleep target while the PIR sees no motion.
+
+### Effective Temperature and Wet-Coil Lockout
+
+Two rooms at 24 °C do not feel the same at 40 % and 65 % relative humidity. RoomMind judges comfort by **Effective Temperature**, and when the air is too humid it dehumidifies by cooling slightly past the target (bounded by the maximum overcool). Right after a cooling run the evaporator coil is wet; running the blower then would re-evaporate that film into the supply air and raise the humidity again. **Wet-Coil Lockout** holds Circulation until the coil has drained or the rooms are dry enough.
+
+### Exterior Openings and Interior Doors
+
+An **Exterior Opening** is a window or door to the outdoors: while it is open the plant pauses, because the envelope is no longer a closed system. An **Interior Door** is a door between two rooms: RoomMind uses it twice. As a sensor it can tell the plant that an open window is a local problem — with the default policy `pause_unless_door_closed`, a room whose own Interior Door is confirmed closed no longer pauses the whole home. And as physics, a shut door throttles the room's duct supply and its return path, so a closed room receives less of the blower's air.
+
+### Whole-Home Coordinated Window Shades
+
+Shades are decided for the whole home, not per device: RoomMind lowers covers before the sun would push a room past its cooling target, closes them at night, leaves them up while a window is open (if configured) and pauses automatic control when someone moves one by hand. Read-only covers (manual blinds, numeric position sensors) are read for shading and never driven.
+
+### Predictive Control vs. Simple
+
+`Settings → Control → Control Mode` decides whether the whole-home plan is used at all. **Predictive (MPC)** is the default and uses the learned room models. **Simple (on/off)** keeps the plant on plain hysteresis; the models still learn and feed the analytics prediction, and covers fall back to a simpler solar estimate.
 
 ## Entities
 
 | Entity | Description |
 |--------|-------------|
 | `climate.roommind_{area_id}` | The room as one thermostat, see [Room climate entity](#room-climate-entity) |
+| `sensor.roommind_central_action` | What the plant is doing: `idle`, `heating`, `cooling` or `circulating`, with the driving rooms, decision reason and active guards as attributes |
+| `sensor.roommind_house_temperature` | The House Reference Temperature the plan works against |
+| `binary_sensor.roommind_wet_coil_lockout` | On while Wet-Coil Lockout holds Circulation after a cooling run |
 | `switch.roommind_vacation` | Global vacation mode toggle |
-| `switch.roommind_climate_control` | Global climate control toggle, the same as `Settings → General`. Off stops RoomMind controlling all rooms and leaves the devices as they are, e.g. for a summer/winter automation |
+| `switch.roommind_climate_control` | Global climate control toggle, the same as `Settings → General`. Off stops RoomMind controlling the plant and leaves the thermostat as it is, e.g. for a summer/winter automation |
 | `switch.roommind_{area_id}_cover_auto` | Per-room automatic cover control toggle |
 | `binary_sensor.roommind_{area_id}_cover_paused` | On when manual cover override is detected |
 | `binary_sensor.roommind_{area_id}_air_quality` | On while the room's CO₂ or VOC is past its threshold (rooms with an air quality sensor); attributes `co2`, `voc`, `reason`, `ventilation_active` |
@@ -184,18 +209,18 @@ An Extended Kalman Filter watches the room temperature and learns each room's he
 
 | Climate feature | In RoomMind |
 |---|---|
-| Target temperature (range in Auto mode) | The targets currently in force. Changing it sets an override that holds until the next change of the active schedule, like a thermostat's temporary hold. Without a schedule it holds until you pick the preset `none`; if the schedule helper cannot be read at that moment (unavailable, deleted), it holds for 4 hours. Sending the value already in force changes nothing. A single temperature in Auto mode (e.g. from a voice assistant) sets the heating side and keeps the cooling side at least at comfort cooling. |
+| Target temperature (range in Auto mode) | The targets currently in force for that room. Changing it sets an override that holds until the next change of the active schedule, like a thermostat's temporary hold. Without a schedule it holds until you pick the preset `none`; if the schedule helper cannot be read at that moment (unavailable, deleted), it holds for 4 hours. Sending the value already in force changes nothing. A single temperature in Auto mode (e.g. from a voice assistant) sets the heating side and keeps the cooling side at least at comfort cooling. |
 | Presets Comfort / Eco | Comfort or eco override, also until the next schedule change |
 | Preset Manual | Shown while a custom temperature is held (set here, in the panel or on the old override entity); picking it holds the targets in force until the next schedule change |
 | Preset Schedule (`none`) | Ends the override and returns to the schedule |
-| HVAC mode `heat` / `cool` / `heat_cool` | Climate mode Heat only / Cool only / Auto, and turns control on. `climate.turn_on` turns control on and keeps the climate mode. In Heat only, an AC in a room with thermostats stays off unless Smart source selection is on. |
-| HVAC mode `off` | Switches the room's devices off and stops controlling them |
-| `hvac_action` | What RoomMind is doing: `heating`, `cooling`, `idle` or `off` |
-| Current temperature and humidity | The room's readings |
+| HVAC mode `heat` / `cool` / `heat_cool` | Climate mode Heat only / Cool only / Auto for the room, and turns control on. `climate.turn_on` turns control on and keeps the climate mode. A room in Heat only takes part in heating plans only; the plant itself stays free to cool the other rooms. |
+| HVAC mode `off` | Stops RoomMind controlling the room; it takes no part in plant decisions until it is turned back on. It does not switch the shared furnace off for the rest of the home. |
+| `hvac_action` | What the plant is doing with the room: `heating`, `cooling`, `circulating`, `idle` or `off` |
+| Current temperature and humidity | The room's readings. The attribute `effective_temperature` is what the room feels like, i.e. the dry-bulb reading adjusted for humidity. |
 
-Attributes: `override_until`, `window_open`, `presence_away`, `occupancy_vacant`, `vacation`. An open window shows as `idle` with `window_open: true`.
+Attributes: `override_until`, `window_open`, `presence_away`, `occupancy_vacant`, `vacation`, `price_level`, `effective_temperature`, `priority_weight`, `occupancy_probability`, `interior_door_open`, `exterior_window_open`. An open window shows as `idle` with `window_open: true`.
 
-The entity is placed in the room's area once when it is created, so it shows up on area cards and Assist finds it by the area ("set the temperature in the living room to 22"). An area you change or remove later is kept. For voice control, hide the room's own thermostats and ACs from Assist (Settings → Voice assistants → Expose), otherwise Assist finds several climate entities in the room and cannot pick one.
+The entity is placed in the room's area once when it is created, so it shows up on area cards and Assist finds it by the area ("set the temperature in the living room to 22"). An area you change or remove later is kept. For voice control, hide the room's own sensors from Assist where that matters.
 
 Like every override, one set here also lifts the outdoor temperature limits for heating and cooling while it lasts.
 
@@ -214,37 +239,51 @@ These per-room entities still work but will be removed in a future release. Room
 | `sensor.roommind_{area_id}_mode` | `hvac_action` of `climate.roommind_{area_id}` |
 | `climate.roommind_{area_id}_override` | `climate.set_temperature` or a preset on `climate.roommind_{area_id}`. Unlike the old entity, an override there ends at the next schedule change. |
 
-`switch.roommind_{area_id}_climate_control` is not deprecated and stays. Its off only stops RoomMind controlling the room and leaves the devices as they are; `climate.turn_off` on the room entity switches them off.
+`switch.roommind_{area_id}_climate_control` is not deprecated and stays. Its off only stops RoomMind controlling the room; the plant keeps running for the rest of the home.
 
 </details>
 
 ## Troubleshooting
 
 <details>
-<summary><b>The room still uses on/off control after a few days</b></summary>
+<summary><b>A room still uses on/off control after a few days</b></summary>
 
-The model needs about three hours of data without and one hour with heating or cooling, and forecasts better than 0.5 °C. Rooms that rarely heat or that are disturbed often (open windows, heaters RoomMind does not control) take longer. The model card on the analytics page shows what is still missing.
-
-</details>
-
-<details>
-<summary><b>The room does not heat or cool when expected</b></summary>
-
-Check the outdoor limits in Settings → Control. Default: no cooling below 16 °C, no heating above 22 °C outside. An active manual override ignores these limits.
+The model needs about three hours of data without and one hour with heating or cooling, and forecasts better than 0.5 °C. Rooms that rarely see a plant cycle, or that are disturbed often (open windows, a fireplace), take longer. The model card on the analytics page shows what is still missing.
 
 </details>
 
 <details>
-<summary><b>The old override entity switched on without a temperature</b></summary>
+<summary><b>The plant does not heat or cool when expected</b></summary>
 
-Turning `climate.roommind_{area_id}_override` on creates an override from the targets currently in force. Because an override ignores the outdoor limits, RoomMind waits 3 seconds for the follow-up temperature before acting on it; a repeated `turn_on` within that time does not shorten the wait. Reloading the integration within those 3 seconds drops the wait, and the seeded targets are then used right away, as for a plain `turn_on` without a follow-up temperature.
+Check `Settings → Central HVAC` first: the Central Thermostat entity, the Heating floor and Cooling ceiling of the Fallback Band, and the plant guards. Then check the outdoor limits in `Settings → Control` — by default no cooling below 16 °C and no heating above 22 °C outside; an active manual override ignores these limits. A plant that reports `circulating` instead of heating is usually equalizing two rooms on purpose; `sensor.roommind_central_action` shows the decision reason and the driving rooms.
+
+</details>
+
+<details>
+<summary><b>The house feels damp right after cooling stops</b></summary>
+
+That is exactly what Wet-Coil Lockout prevents. Check `binary_sensor.roommind_wet_coil_lockout` and `Settings → Central HVAC → Humidity comfort`: a wet-coil lockout time that is too short (or a Wet-coil max RH that is too high) lets the blower start while the evaporator is still wet. In a very humid climate, lower the dehumidify threshold and allow a little more overcool instead of longer circulation.
+
+</details>
+
+<details>
+<summary><b>One room is always too cold (or too warm)</b></summary>
+
+A ducted system cannot serve every room equally. Give the room its own temperature sensor so it becomes a real Thermal Zone, check that its Interior Door is reported (a shut door throttles its supply and return), and give the thermostat's own area a sensor too — the House Reference Temperature is only as good as the readings behind it. Rooms far from the thermostat benefit most from Circulation.
+
+</details>
+
+<details>
+<summary><b>A setpoint changed on the wall thermostat was overwritten</b></summary>
+
+Turn on `Follow thermostat setpoint` in `Settings → Central HVAC` with an override duration that suits the household. RoomMind then adopts a setpoint changed on the Central Thermostat itself as a manual override and leaves the plant alone for that long. Like every override, it lifts the outdoor temperature limits while it lasts.
 
 </details>
 
 <details>
 <summary><b>The model seems wrong after changes to the room</b></summary>
 
-If you changed insulation or radiators or moved sensors, use "Re-learn faster" in Settings → Model training, or reset the model in Settings → Reset model.
+If you changed insulation, windows, or moved sensors, use "Re-learn faster" in `Settings → Model training`, or reset the model in `Settings → Reset model`.
 
 </details>
 
@@ -258,8 +297,9 @@ Hard-refresh the browser: **Cmd+Shift+R** (Mac) or **Ctrl+Shift+R** (Windows/Lin
 ## Requirements
 
 - **Home Assistant** 2026.5 or newer
-- At least one Home Assistant area with a `climate.*` entity
-- Optional: temperature, humidity, window, occupancy and CO₂/VOC sensors, weather entity, electricity price sensor, person entities
+- A ducted Central Plant behind **one** `climate.*` Central Thermostat (furnace, heat pump, or both) that reports `hvac_action`, and ideally `fan_mode`
+- At least one Home Assistant area with a temperature sensor
+- Optional: humidity, window, door, occupancy and CO₂/VOC sensors, weather entity, electricity price sensor, person entities, covers
 
 No cloud services, no account: everything runs locally.
 
@@ -272,4 +312,4 @@ No cloud services, no account: everything runs locally.
 
 If RoomMind keeps your home comfortable, you can support its development:
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Y8Y31VP2VK)
+[![ko-fi](https://img.shields.io/badge/Ko--fi-Support%20RoomMind-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/Y8Y31VP2VK)

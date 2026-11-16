@@ -28,6 +28,7 @@ def coordinator():
     coord.async_room_paused = AsyncMock()
     coord.async_room_added = AsyncMock()
     coord.async_room_removed = AsyncMock()
+    coord.note_room_deleted = MagicMock(return_value=True)
     return coord
 
 
@@ -94,7 +95,7 @@ async def test_the_room_runs_again_when_its_area_is_back(rm_hass, store, coordin
     room = coordinator.async_room_added.await_args[0][0]
     assert room["area_id"] == "guest_room"
     assert room["comfort_temp"] == 22.5
-    # Resting again later switches its devices off again
+    # Running again loses the "already switched off" mark
     assert room[REST_SWITCHED_OFF] is False
 
 
@@ -126,9 +127,9 @@ async def test_deleting_a_resting_room_drops_its_learned_model(rm_hass, store, c
 
 
 @pytest.mark.asyncio
-async def test_deleting_a_room_queues_its_devices_and_forgets_it_in_the_room_lists(rm_hass, store, coordinator):
+async def test_deleting_a_room_notifies_the_coordinator_and_cleans_its_lists(rm_hass, store, coordinator):
     await store.async_load()
-    await store.async_save_room("old_room", {"devices": [{"entity_id": "climate.old_trv", "type": "trv"}]})
+    await store.async_save_room("old_room", {"display_name": "Old room"})
     await store.async_save_settings(
         {
             "hidden_rooms": ["old_room", "kitchen"],
@@ -136,13 +137,12 @@ async def test_deleting_a_room_queues_its_devices_and_forgets_it_in_the_room_lis
             "learning_disabled_rooms": ["old_room"],
         }
     )
-    coordinator.note_room_deleted = MagicMock(return_value=True)
 
     assert await async_remove_room(rm_hass, "old_room")
 
     area_id, room = coordinator.note_room_deleted.call_args[0]
     assert area_id == "old_room"
-    assert [d["entity_id"] for d in room["devices"]] == ["climate.old_trv"]
+    assert room["display_name"] == "Old room"
     settings = store.get_settings()
     assert settings["hidden_rooms"] == ["kitchen"]
     assert settings["room_order"] == ["kitchen"]
@@ -150,26 +150,34 @@ async def test_deleting_a_room_queues_its_devices_and_forgets_it_in_the_room_lis
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("queued", [True, False])
-async def test_a_deleted_room_hands_its_valves_back_only_when_its_devices_stay_on(rm_hass, store, coordinator, queued):
-    """Switched off next cycle: the room target as setpoint would let the TRV heat on by itself."""
+async def test_a_deleted_room_drops_its_boost_anchor(rm_hass, store, coordinator):
     await store.async_load()
-    await store.async_save_room(
-        "old_room",
-        {
-            "devices": [
-                {
-                    "entity_id": "climate.old_trv",
-                    "type": "trv",
-                    "valve_opening_entity": "number.old_trv_opening",
-                    "valve_closing_entity": "number.old_trv_closing",
-                }
-            ]
-        },
-    )
-    coordinator.note_room_deleted = MagicMock(return_value=queued)
+    await store.async_save_room("old_room", {})
+    await store.async_save_settings({"boost_applied_at": {"old_room": 12, "kitchen": 7}})
 
-    with patch("custom_components.roommind.websocket_api.async_release_valve", AsyncMock()) as release:
-        assert await async_remove_room(rm_hass, "old_room")
+    assert await async_remove_room(rm_hass, "old_room")
 
-    assert release.await_args.kwargs["hand_back"] is not queued
+    assert store.get_settings()["boost_applied_at"] == {"kitchen": 7}
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_unknown_room_reports_false(rm_hass, store, coordinator):
+    await store.async_load()
+
+    assert await async_remove_room(rm_hass, "missing") is False
+    coordinator.note_room_deleted.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pausing_and_resuming_call_the_coordinator(rm_hass, store, coordinator):
+    await store.async_load()
+    await store.async_save_room("office", {})
+    from custom_components.roommind.websocket_api import async_pause_room, async_resume_room
+
+    await async_pause_room(rm_hass, "office")
+    coordinator.async_room_paused.assert_awaited_once_with("office")
+
+    await store.async_update_room("office", {REST_SWITCHED_OFF: True})
+    await async_resume_room(rm_hass, "office")
+    room = coordinator.async_room_added.await_args[0][0]
+    assert room[REST_SWITCHED_OFF] is False

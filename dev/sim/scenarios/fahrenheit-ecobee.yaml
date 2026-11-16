@@ -1,39 +1,106 @@
 name: fahrenheit-ecobee
 description: >
-  US house in °F with an Ecobee-like heat_cool thermostat (whole degrees, range
-  setpoint) in direct mode. No out-of-range or rejected setpoints, no flapping (#22, #277, #117).
+  Multi-room US house in July on one Central Plant whose Central Thermostat is an
+  Ecobee-style unit in °F: whole-degree setpoint steps and a heat_cool range setpoint.
+  RoomMind has to work the Fallback Band as a range in Auto (low/high), keep every
+  setpoint inside the thermostat's 45..92 °F limits, and stay below six commands per
+  hour on a thermostat that rounds to whole degrees -- a snapping setpoint must not turn
+  into command chatter (#22, #277, #117). Comfort is held in the occupied rooms.
 refs: [22, 277, 117]
-tags: [fahrenheit, heat-pump]
-start: 2026-01-12T00:00
-duration: 3d
-location: {latitude: 40.7, longitude: -74.0, time_zone: America/New_York, unit_system: us_customary, country: US}
-weather: {profile: temperate}
+tags: [central-plant, fahrenheit, range-setpoint, ecobee]
+start: 2026-07-20T00:00
+duration: 2d
+location: {latitude: 33.75, longitude: -84.39, time_zone: America/New_York, unit_system: us_customary, country: US}
+weather: {profile: hot-summer}
 house:
   building: us_wood_frame
+  floors: {ground: Ground floor, upper: Upstairs}
   outdoor: {sensors: {temperature: sensor.outdoor_temp}}
   rooms:
     living_room:
+      name: Living room
+      floor: ground
       floor_area_m2: 45
       exterior_wall_m2: 25
-      initial: {temperature: 19.0}
-      windows: [{orientation: S, area_m2: 4}]
-      devices: [{entity_id: climate.ecobee, profile: ecobee, heat_capacity_w: 6000, cool_capacity_w: 5000}]
-      sensors: {temperature: {entity_id: sensor.living_room_temp}}
+      initial: {temperature: 26.0, mass_temperature: 25.5}
+      windows: [{orientation: S, area_m2: 4, g_value: 0.6}]
+      devices:
+        - {entity_id: climate.ecobee, profile: ecobee, serves_rooms: [office, bedroom], supply_shares: {living_room: 0.45, office: 0.3, bedroom: 0.25}}
+      sensors:
+        temperature: {entity_id: sensor.living_room_temp}
+        occupancy: {entity_id: binary_sensor.living_room_presence}
+    office:
+      name: Office
+      floor: upper
+      floor_area_m2: 18
+      exterior_wall_m2: 12
+      initial: {temperature: 26.0, mass_temperature: 25.5}
+      windows: [{orientation: E, area_m2: 2, g_value: 0.6}]
+      sensors:
+        temperature: {entity_id: sensor.office_temp}
+        occupancy: {entity_id: binary_sensor.office_presence}
+    bedroom:
+      name: Bedroom
+      floor: upper
+      floor_area_m2: 16
+      exterior_wall_m2: 11
+      initial: {temperature: 25.5}
+      windows: [{orientation: W, area_m2: 2, g_value: 0.6}]
+      sensors:
+        temperature: {entity_id: sensor.bedroom_temp}
+        occupancy: {entity_id: binary_sensor.bedroom_presence}
+people:
+  - id: robin
+    plan:
+      presence: {weekday: ["home@00:00"], weekend: ["home@00:00"]}
+      rooms: {sleeping: "22:00-07:00", office: "09:00-17:00", living: "default"}
+    rooms: {sleeping: bedroom, office: office, living: living_room}
 roommind:
   settings:
     outdoor_temp_sensor: sensor.outdoor_temp
+    weather_entity: weather.simhome
+    central_plant:
+      thermostat_entity: climate.ecobee
+      nudge_delta_c: 1.2
+      max_nudge_headroom_c: 2.5
+      fallback_heat_c: 16.5
+      fallback_cool_c: 26.5
+      min_deadband_c: 3.0
+      min_run_minutes: 10
+      min_off_minutes: 5
+      changeover_minutes: 20
+      exterior_open_policy: pause_unless_door_closed
   rooms:
     living_room:
-      devices: [{entity_id: climate.ecobee, type: ac, setpoint_mode: direct}]
       temperature_sensor: sensor.living_room_temp
+      occupancy_sensors: [binary_sensor.living_room_presence]
       climate_mode: auto
-      comfort_heat: 21.0
+      comfort_heat: 20.0
+      comfort_cool: 24.0
+      eco_heat: 17.0
+      eco_cool: 26.5
+    office:
+      temperature_sensor: sensor.office_temp
+      occupancy_sensors: [binary_sensor.office_presence]
+      climate_mode: auto
+      comfort_heat: 20.0
       comfort_cool: 24.5
       eco_heat: 17.0
-      eco_cool: 27.0
+      eco_cool: 26.5
+    bedroom:
+      temperature_sensor: sensor.bedroom_temp
+      occupancy_sensors: [binary_sensor.bedroom_presence]
+      climate_mode: auto
+      comfort_heat: 19.0
+      comfort_cool: 24.0
+      eco_heat: 17.0
+      eco_cool: 26.5
 expect:
   - {invariant: no_rejected_commands}
   - {invariant: setpoints_within_device_range}
-  - {invariant: max_commands_per_hour, entity_id: climate.ecobee, limit: 8, known_failure: 'candidate: on/off cycles of ~20 min (4 commands each): the oversized unit heats the air node in ~2 min and overshoots; in direct mode RoomMind still switches it off between runs. First hour: bang-bang restarts shortly after a stop while the model is still learning'}
-  - {metric: comfort.in_band_pct, room: living_room, min: 85}
-  - {metric: device.commanded_runs, entity_id: climate.ecobee, max: 300, label: no heat/idle toggle every cycle (738 runs before the fix)}
+  # Whole-degree steps: never more than six commands in any sliding hour.
+  - {invariant: max_commands_per_hour, entity_id: climate.ecobee, limit: 6}
+  - {metric: device.commands_per_hour, entity_id: climate.ecobee, max: 6, label: no chatter from whole-degree snapping}
+  - {metric: comfort.in_band_pct, room: living_room, min: 85, label: occupied living_room holds its band}
+  - {metric: comfort.in_band_pct, room: office, min: 80, label: occupied office holds its band}
+  - {metric: device.rejected_commands, entity_id: climate.ecobee, max: 0, label: range mode acks every setpoint}

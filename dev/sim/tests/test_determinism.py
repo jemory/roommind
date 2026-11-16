@@ -22,7 +22,16 @@ VENV = REAL_HOME / "venvs" / f"ha-{DEFAULT_HA_VERSION}"
 def _run(home: Path) -> Path:
     env = dict(os.environ, ROOMMIND_SIM_HOME=str(home), PYTHONPATH=str(SIM_ROOT))
     res = subprocess.run(
-        [sys.executable, "-m", "roommind_sim.cli", "run", "smoke-ac-compressor", "--set", "duration=1d", "-q"],
+        [
+            sys.executable,
+            "-m",
+            "roommind_sim.cli",
+            "run",
+            "central-open-window-door-isolation",
+            "--set",
+            "duration=1d",
+            "-q",
+        ],
         cwd=SIM_ROOT,
         env=env,
         capture_output=True,

@@ -30,8 +30,9 @@ async def async_setup_entry(
     coordinator: RoomMindCoordinator = hass.data[DOMAIN][entry.entry_id]
     store = hass.data[DOMAIN]["store"]
     coordinator.async_add_binary_sensor_entities = async_add_entities
+    # The Wet Coil lockout is one shared plant condition, not a room one
+    entities: list[BinarySensorEntity] = [RoomMindWetCoilLockoutBinarySensor(coordinator)]
     rooms = rooms_with_area(hass, store.get_rooms())
-    entities: list[BinarySensorEntity] = []
     for area_id, room in rooms.items():
         if room.get("covers"):
             entities.extend(_create_room_binary_sensors(coordinator, area_id))
@@ -39,8 +40,7 @@ async def async_setup_entry(
         if has_air_quality_sensor(room):
             entities.append(RoomMindAirQualitySensor(coordinator, area_id))
             coordinator._air_quality_entity_areas.add(area_id)
-    if entities:
-        async_add_entities(entities)
+    async_add_entities(entities)
 
 
 class RoomMindCoverPausedSensor(CoordinatorEntity, BinarySensorEntity):
@@ -105,3 +105,35 @@ class RoomMindAirQualitySensor(CoordinatorEntity, BinarySensorEntity):
             "reason": live.get("air_quality_reason"),
             "ventilation_active": live.get("ventilation_active", False),
         }
+
+
+def _central_plant_data(coordinator: RoomMindCoordinator) -> dict:
+    """Return the live Central Plant block, or an empty dict before the first cycle."""
+    data = coordinator.data or {}
+    plant = data.get("central_plant") if isinstance(data, dict) else None
+    return plant if isinstance(plant, dict) else {}
+
+
+class RoomMindWetCoilLockoutBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """On while a wet evaporator coil locks fan-only Circulation out of the plant."""
+
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = True
+    _attr_icon = "mdi:water-off"
+    _attr_translation_key = "wet_coil_lockout"
+
+    def __init__(self, coordinator: RoomMindCoordinator) -> None:
+        """Initialize the Wet Coil Circulation Lockout binary sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_wet_coil_lockout"
+        self.entity_id = f"binary_sensor.{DOMAIN}_wet_coil_lockout"
+
+    @property
+    def is_on(self) -> bool:
+        """Return True while the plant must not circulate air across the wet coil."""
+        return bool(_central_plant_data(self.coordinator).get("wet_coil_locked", False))
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Expose how much moisture the coil still holds."""
+        return {"wet_coil_charge": _central_plant_data(self.coordinator).get("wet_coil_charge")}

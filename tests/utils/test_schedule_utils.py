@@ -13,17 +13,22 @@ import pytest
 from homeassistant.util import dt as dt_util
 
 from custom_components.roommind.const import SCHEDULE_UNREADABLE_HOLD_HOURS, TargetTemps
+from custom_components.roommind.utils.price_utils import LEVEL_CHEAP, PriceSignal
 from custom_components.roommind.utils.schedule_utils import (
     band_in_force,
     find_active_block,
     get_active_schedule_entity,
+    is_plant_override_at,
     make_target_resolver,
     mask_override_band,
     override_hold_until,
     override_preset_band,
+    price_shifted,
     read_schedule_blocks,
     resolve_schedule_index,
     resolve_target_at_time,
+    resolve_targets_at_time,
+    schedule_sets_target,
     set_band_sides,
 )
 
@@ -1972,3 +1977,275 @@ def test_hold_under_an_unreadable_schedule_ends_after_the_fallback(hass):
     now = time.time()
     until = override_hold_until(hass, _HOLD_ROOM, now=now)
     assert until == now + SCHEDULE_UNREADABLE_HOLD_HOURS * 3600
+
+
+# ---------------------------------------------------------------------------
+# Whole-home plant override (Central HVAC wall thermostat) + price shift modes
+# ---------------------------------------------------------------------------
+
+
+class TestIsPlantOverrideAt:
+    """Whole-home plant override window checks."""
+
+    def test_no_plant_override_returns_false(self):
+        """No wall setpoint recorded on the Central Thermostat yet."""
+        assert is_plant_override_at(1000.0, {}) is False
+        assert is_plant_override_at(1000.0, {"plant_override_heat": None, "plant_override_cool": None}) is False
+
+    def test_active_plant_override_returns_true(self):
+        """A wall setpoint within its hold window is in force."""
+        assert is_plant_override_at(1000.0, {"plant_override_heat": 22.0, "plant_override_cool": None}) is True
+
+    def test_expired_plant_override_returns_false(self):
+        """A wall setpoint past its expiry is no longer in force."""
+        assert is_plant_override_at(1000.0, {"plant_override_heat": 22.0, "plant_override_until": 500.0}) is False
+
+    def test_cool_only_plant_override_is_active(self):
+        """A single-setpoint (cool) wall thermostat is a plant override too."""
+        assert is_plant_override_at(1000.0, {"plant_override_heat": None, "plant_override_cool": 20.0}) is True
+
+    def test_presence_away_with_clears_override_holds_it(self):
+        """An away home with presence_clears_override set does not apply the override."""
+        settings = {"plant_override_heat": 22.0, "presence_clears_override": True}
+        assert is_plant_override_at(1000.0, settings, presence_away=True) is False
+        assert (
+            is_plant_override_at(
+                1000.0, {"plant_override_heat": 22.0, "presence_clears_override": False}, presence_away=True
+            )
+            is True
+        )
+
+
+class TestResolveTargetsAtTimePlantOverride:
+    """Whole-home plant overrides outrank the schedule but not a per-room override."""
+
+    def test_plant_override_wins_over_the_schedule(self):
+        """A wall setpoint replaces the schedule block until it expires."""
+        ts = _monday_ts()
+        result = resolve_targets_at_time(
+            ts=ts,
+            schedule_blocks=_monday_blocks({"temperature": 22.0}),
+            override_until=None,
+            override_heat=None,
+            override_cool=None,
+            vacation_until=None,
+            vacation_temp=None,
+            comfort_heat=21.0,
+            comfort_cool=24.0,
+            eco_heat=17.0,
+            eco_cool=27.0,
+            plant_override_until=ts + 7200,
+            plant_override_heat=23.0,
+            plant_override_cool=None,
+        )
+        # One-sided wall setpoint: heat follows the cool side, never crossing the band.
+        assert result == TargetTemps(heat=23.0, cool=23.0)
+
+    def test_plant_override_wins_over_vacation(self):
+        """A wall setpoint outranks an active vacation."""
+        ts = _monday_ts()
+        result = resolve_targets_at_time(
+            ts=ts,
+            schedule_blocks=None,
+            override_until=None,
+            override_heat=None,
+            override_cool=None,
+            vacation_until=ts + 86400,
+            vacation_temp=16.0,
+            comfort_heat=21.0,
+            comfort_cool=24.0,
+            eco_heat=17.0,
+            eco_cool=27.0,
+            plant_override_until=ts + 7200,
+            plant_override_heat=22.0,
+            plant_override_cool=26.0,
+        )
+        assert result == TargetTemps(heat=22.0, cool=26.0)
+
+    def test_plant_override_yields_to_the_per_room_override(self):
+        """A per-room override is the tighter, more specific intent and wins."""
+        ts = _monday_ts()
+        result = resolve_targets_at_time(
+            ts=ts,
+            schedule_blocks=None,
+            override_until=ts + 7200,
+            override_heat=25.0,
+            override_cool=25.0,
+            vacation_until=None,
+            vacation_temp=None,
+            comfort_heat=21.0,
+            comfort_cool=24.0,
+            eco_heat=17.0,
+            eco_cool=27.0,
+            plant_override_until=None,
+            plant_override_heat=22.0,
+            plant_override_cool=22.0,
+        )
+        assert result == TargetTemps(heat=25.0, cool=25.0)
+
+    def test_plant_override_respects_presence_clears_override(self):
+        """An away home with presence_clears_override set holds the wall setpoint."""
+        ts = _monday_ts()
+        result = resolve_targets_at_time(
+            ts=ts,
+            schedule_blocks=None,
+            override_until=None,
+            override_heat=None,
+            override_cool=None,
+            vacation_until=None,
+            vacation_temp=None,
+            comfort_heat=21.0,
+            comfort_cool=24.0,
+            eco_heat=17.0,
+            eco_cool=27.0,
+            plant_override_until=ts + 7200,
+            plant_override_heat=22.0,
+            plant_override_cool=22.0,
+            presence_away=True,
+            presence_clears_override=True,
+        )
+        assert result == TargetTemps(heat=17.0, cool=27.0)
+
+    def test_expired_plant_override_falls_through_to_the_schedule(self):
+        """An expired wall setpoint hands the schedule back."""
+        ts = _monday_ts()
+        result = resolve_targets_at_time(
+            ts=ts,
+            schedule_blocks=_monday_blocks({"temperature": 22.0}),
+            override_until=None,
+            override_heat=None,
+            override_cool=None,
+            vacation_until=None,
+            vacation_temp=None,
+            comfort_heat=21.0,
+            comfort_cool=24.0,
+            eco_heat=17.0,
+            eco_cool=27.0,
+            plant_override_until=ts - 100,
+            plant_override_heat=23.0,
+            plant_override_cool=None,
+        )
+        assert result == TargetTemps(heat=22.0, cool=22.0)
+
+
+class TestScheduleSetsTargetPlantOverride:
+    """The price shift must never move a manual wall-thermostat override."""
+
+    def test_plant_override_is_not_a_price_shift_target(self):
+        """A whole-home plant override is the user's own choice, not a price opportunity."""
+        room = {"override_heat": None, "override_cool": None}
+        settings = {"plant_override_heat": 22.0, "plant_override_cool": None, "plant_override_until": None}
+        assert schedule_sets_target(time.time(), room, settings, presence_away=False, room_vacant=False) is False
+
+    def test_room_override_is_not_a_price_shift_target(self):
+        room = {"override_heat": 23.0, "override_cool": None, "override_until": None}
+        assert schedule_sets_target(time.time(), room, {}, presence_away=False, room_vacant=False) is False
+
+    def test_no_override_says_the_schedule_sets_the_target(self):
+        room = {"override_heat": None, "override_cool": None}
+        assert schedule_sets_target(time.time(), room, {}, presence_away=False, room_vacant=False) is True
+
+
+class TestPriceShiftModes:
+    """Electricity price shifting: cool-only by default, "both" when opted in."""
+
+    def _signal(self, now: float) -> PriceSignal:
+        """A cheap signal: charging (pre-heating / pre-cooling) the schedule target."""
+        return PriceSignal(current_level=LEVEL_CHEAP, now=now)
+
+    def test_default_price_shift_is_cool_only(self):
+        """Central heating is a fuel furnace: the default leaves the heat side alone."""
+        now = time.time()
+        shifted, deltas = price_shifted(
+            TargetTemps(heat=21.0, cool=24.0),
+            now,
+            {"price_shift": 1.0},
+            {},
+            self._signal(now),
+            presence_away=False,
+            room_vacant=False,
+        )
+        assert shifted == TargetTemps(heat=21.0, cool=23.0)
+        assert deltas == (0.0, -1.0)
+
+    def test_both_mode_shifts_heat_and_cool(self):
+        """An explicit Central Plant "both" opt-in shifts the heating target too."""
+        now = time.time()
+        shifted, deltas = price_shifted(
+            TargetTemps(heat=21.0, cool=24.0),
+            now,
+            {"price_shift": 1.0},
+            {"central_plant": {"price_shift_modes": "both"}},
+            self._signal(now),
+            presence_away=False,
+            room_vacant=False,
+        )
+        assert shifted == TargetTemps(heat=22.0, cool=23.0)
+        assert deltas == (1.0, -1.0)
+
+    def test_global_price_shift_modes_both_shifts_both_sides(self):
+        """The top-level price_shift_modes key is honoured the same way."""
+        now = time.time()
+        shifted, deltas = price_shifted(
+            TargetTemps(heat=21.0, cool=24.0),
+            now,
+            {"price_shift": 1.0},
+            {"price_shift_modes": "both"},
+            self._signal(now),
+            presence_away=False,
+            room_vacant=False,
+        )
+        assert shifted == TargetTemps(heat=22.0, cool=23.0)
+        assert deltas == (1.0, -1.0)
+
+    def test_cool_only_keeps_the_heat_side_and_clamps(self):
+        """Cheap pre-cooling never pushes the cool target under the kept heat target."""
+        now = time.time()
+        shifted, deltas = price_shifted(
+            TargetTemps(heat=21.0, cool=18.0),
+            now,
+            {"price_shift": 2.0, "central_plant": {"price_shift_modes": "cool_only"}},
+            {},
+            self._signal(now),
+            presence_away=False,
+            room_vacant=False,
+        )
+        assert shifted == TargetTemps(heat=21.0, cool=21.0)
+
+    def test_plant_override_suppresses_the_price_shift(self):
+        """A wall setpoint is the user's own choice; the price never shifts it."""
+        now = time.time()
+        room = {"price_shift": 1.0}
+        settings = {"plant_override_heat": 22.0, "plant_override_cool": None, "plant_override_until": None}
+        shifted, deltas = price_shifted(
+            TargetTemps(heat=21.0, cool=24.0),
+            now,
+            room,
+            settings,
+            self._signal(now),
+            presence_away=False,
+            room_vacant=False,
+        )
+        assert shifted == TargetTemps(heat=21.0, cool=24.0)
+        assert deltas == (0.0, 0.0)
+
+
+def test_make_target_resolver_applies_the_whole_home_plant_override():
+    """The MPC resolver takes the whole-home wall setpoint from the Central Plant settings."""
+    room = {"comfort_heat": 21.0, "comfort_cool": 24.0, "eco_heat": 17.0, "eco_cool": 27.0}
+    settings = {"plant_override_heat": None, "plant_override_cool": 20.0, "plant_override_until": None}
+    resolver = make_target_resolver(None, room, settings)
+    assert resolver(time.time()) == TargetTemps(heat=20.0, cool=20.0)
+
+
+def test_make_target_resolver_never_priceshifts_a_whole_home_plant_override():
+    """A wall setpoint survives the price shift untouched."""
+    room = {"comfort_heat": 21.0, "comfort_cool": 24.0, "eco_heat": 17.0, "eco_cool": 27.0, "price_shift": 1.0}
+    settings = {"plant_override_heat": 22.0, "plant_override_cool": None, "plant_override_until": None}
+    resolver = make_target_resolver(
+        None,
+        room,
+        settings,
+        price_signal=PriceSignal(current_level=LEVEL_CHEAP, now=time.time()),
+    )
+    assert resolver(time.time()) == TargetTemps(heat=22.0, cool=24.0)

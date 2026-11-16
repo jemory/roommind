@@ -1,0 +1,102 @@
+name: central-open-window-door-isolation
+description: >
+  Cold January day near Chicago on one Central Plant. The unoccupied guest_room has its
+  exterior window open while the Interior Door between it and the living_room stands
+  open, so the whole envelope is leaking and the plant pauses heating for the house
+  (exterior_open_policy: pause_unless_door_closed). Closing the guest room's interior
+  door turns the open window into a local problem: the door both confirms the room is
+  isolated and throttles its duct supply and return, so the plant resumes safely and the
+  occupied living_room warms back up while the guest window is still open.
+refs: [1, 3]
+tags: [central-plant, openings, interior-door, exterior-open]
+start: 2026-01-12T00:00
+duration: 1d
+location: {latitude: 41.88, longitude: -87.63, time_zone: America/Chicago, unit_system: us_customary, country: US}
+weather: {profile: winter-cold, fixed: {temperature: -14, cloud: 80}}
+house:
+  building: us_wood_frame
+  floors: {ground: Ground floor, upper: Upstairs}
+  outdoor: {sensors: {temperature: sensor.outdoor_temp}}
+  rooms:
+    living_room:
+      name: Living room
+      floor: ground
+      floor_area_m2: 40
+      exterior_wall_m2: 24
+      initial: {temperature: 18.0}
+      windows: [{orientation: S, area_m2: 4, g_value: 0.6}]
+      devices:
+        - {entity_id: climate.central_hvac, profile: central_furnace_hp, heat_capacity_w: 8000, serves_rooms: [guest_room], supply_shares: {living_room: 0.7, guest_room: 0.3}}
+      sensors:
+        temperature: {entity_id: sensor.living_room_temp}
+        occupancy: {entity_id: binary_sensor.living_room_presence}
+    guest_room:
+      name: Guest room
+      floor: upper
+      floor_area_m2: 12
+      exterior_wall_m2: 8
+      initial: {temperature: 17.0}
+      windows: [{orientation: N, area_m2: 1.5, g_value: 0.6, sensor: binary_sensor.guest_window}]
+      interior_doors: [{sensor: binary_sensor.guest_door, neighbor: living_room, open: true}]
+      sensors:
+        temperature: {entity_id: sensor.guest_room_temp}
+        occupancy: {entity_id: binary_sensor.guest_room_presence}
+people:
+  - id: robin
+    plan:
+      presence: {weekday: ["home@00:00"], weekend: ["home@00:00"]}
+      rooms: {living: "default"}
+    rooms: {living: living_room}
+roommind:
+  settings:
+    outdoor_temp_sensor: sensor.outdoor_temp
+    weather_entity: weather.simhome
+    central_plant:
+      thermostat_entity: climate.central_hvac
+      nudge_delta_c: 1.5
+      max_nudge_headroom_c: 3.0
+      fallback_heat_c: 16.5
+      fallback_cool_c: 27.0
+      min_deadband_c: 2.5
+      min_run_minutes: 15
+      min_off_minutes: 5
+      exterior_open_policy: pause_unless_door_closed
+  rooms:
+    living_room:
+      temperature_sensor: sensor.living_room_temp
+      occupancy_sensors: [binary_sensor.living_room_presence]
+      climate_mode: heat_only
+      comfort_heat: 21.5
+      eco_heat: 18.0
+    guest_room:
+      temperature_sensor: sensor.guest_room_temp
+      occupancy_sensors: [binary_sensor.guest_room_presence]
+      exterior_window_sensors: [binary_sensor.guest_window]
+      interior_door_sensors: [binary_sensor.guest_door]
+      interior_door_delay: 0
+      door_closed_mix_factor: 0.35
+      occupancy_mode: guardrail_only
+      climate_mode: heat_only
+      comfort_heat: 19.0
+      eco_heat: 16.0
+timeline:
+  # 02:00 the guest opens the window and leaves the door to the living_room open.
+  - {at: "+0d02h", do: window.open, entity_id: binary_sensor.guest_window}
+  # 08:00 the door is pulled shut: the room is isolated, the window stays open.
+  - {at: "+0d08h", do: door.close, entity_id: binary_sensor.guest_door}
+  - {at: "+0d12h", do: window.close, entity_id: binary_sensor.guest_window}
+expect:
+  - {invariant: no_rejected_commands}
+  - {invariant: setpoints_within_device_range}
+  - {invariant: window_open_pauses}
+  - {invariant: target_never_empty}
+  # Warm and heating before the opening.
+  - {check: "true_temp('living_room') >= 20.0", at: "+0d01h55m", label: living_room warm before the opening}
+  # Open window + open interior door: the whole house pauses.
+  - {check: "door('binary_sensor.guest_door').open == true and room.living_room.mode == 'idle'", at: "+0d05h", label: open window and open door pause central heating}
+  - {check: "dev('climate.central_hvac').action != 'heating'", at: "+0d05h", label: no furnace call while the envelope leaks}
+  - {check: "true_temp('living_room') < 21.0", at: "+0d05h", label: the paused house drifts down}
+  # Door closed: the open window is local, the plant resumes for the occupied room.
+  - {check: "door('binary_sensor.guest_door').open == false", at: "+0d08h05m", label: interior door reports closed}
+  - {check: "world.rooms.guest_room.windows_open == 1 and dev('climate.central_hvac').action == 'heating'", at: "+0d08h20m", label: heating resumes although the guest window is still open}
+  - {check: "true_temp('living_room') > 19.0", at: "+0d09h30m", label: occupied living_room warms back up}

@@ -8,11 +8,11 @@ description: >
   room the single value is the cooling target.
 roommind:
   rooms:
-    wohnzimmer:
+    living_room:
       comfort_cool-: ~
       eco_cool-: ~
       comfort_temp: 24.5
       eco_temp: 27.0
 expect+:
-  - {check: "room.wohnzimmer.cool_target == 24.5", at: "+1d12h", label: single comfort_temp is the cool target}
-  - {check: "room.wohnzimmer.heat_target is None or room.wohnzimmer.heat_target <= room.wohnzimmer.cool_target", at: "+1d12h", label: no inverted band}
+  - {check: "room.living_room.cool_target == 24.5", at: "+1d12h", label: single comfort_temp is the cool target}
+  - {check: "room.living_room.heat_target is None or room.living_room.heat_target <= room.living_room.cool_target", at: "+1d12h", label: no inverted band}

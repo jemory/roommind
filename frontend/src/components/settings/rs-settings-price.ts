@@ -4,9 +4,10 @@
 import { html, css, nothing } from "lit";
 import { RsSettingsBase } from "./rs-settings-base";
 import { customElement, property } from "lit/decorators.js";
-import type { HomeAssistant, PriceStatus } from "../../types";
+import type { HomeAssistant, PriceShiftModes, PriceStatus } from "../../types";
 import { localize } from "../../utils/localize";
 import { describePriceStatus } from "../../utils/price-status";
+import "../shared/rs-segmented";
 
 // A price sensor (with or without a forecast attribute), an event with rates (Octopus Energy)
 // or something that is on while cheap
@@ -24,6 +25,8 @@ export class RsSettingsPrice extends RsSettingsBase {
   @property({ attribute: false }) public hass!: HomeAssistant;
   @property({ type: String }) public priceEntity = "";
   @property({ attribute: false }) public status: PriceStatus | null = null;
+  /** Which sides the electricity price may shift (Central Plant). */
+  @property({ type: String }) public priceShiftModes: PriceShiftModes = "cool_only";
 
   render() {
     const l = this.hass.language;
@@ -42,6 +45,28 @@ export class RsSettingsPrice extends RsSettingsBase {
         ></ha-entity-picker>
         <span class="field-hint">${localize("settings.price_entity_hint", l)}</span>
         ${this.priceEntity ? this._renderStatus(l) : nothing}
+      </div>
+      <div class="settings-section">
+        <span class="field-label">${localize("settings.price_shift_modes", l)}</span>
+        <rs-segmented
+          .label=${localize("settings.price_shift_modes", l)}
+          .options=${[
+            {
+              value: "cool_only",
+              label: localize("settings.price_shift_mode.cool_only", l),
+              icon: "mdi:snowflake",
+            },
+            {
+              value: "both",
+              label: localize("settings.price_shift_mode.both", l),
+              icon: "mdi:thermometer",
+            },
+          ]}
+          .value=${this.priceShiftModes}
+          @value-changed=${(e: CustomEvent<{ value: string }>) =>
+            this._fire("priceShiftModes", e.detail.value)}
+        ></rs-segmented>
+        <span class="field-hint">${localize("settings.price_shift_modes_hint", l)}</span>
       </div>
       <div class="settings-section">
         <p class="note">${localize("settings.price_room_hint", l)}</p>

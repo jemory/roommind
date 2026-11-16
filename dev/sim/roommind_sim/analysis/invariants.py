@@ -26,7 +26,25 @@ class Violation:
 
 
 def _groups(run: RunData) -> list[dict[str, Any]]:
-    return list(run.settings().get("compressor_groups") or [])
+    """Compressor groups as configured, plus the central plant's thermostat as one group.
+
+    A central plant (``settings.central_plant``) runs the whole house through a single
+    thermostat, so it takes the place of a compressor group for the min-run/min-off and
+    mode invariants. Declared ``compressor_groups`` always win for their members.
+    """
+    groups = [g for g in (run.settings().get("compressor_groups") or []) if g.get("members")]
+    plant = run.settings().get("central_plant") or {}
+    thermostat = plant.get("thermostat_entity") if isinstance(plant, dict) else None
+    if thermostat and not any(thermostat in (g.get("members") or []) for g in groups):
+        groups.append(
+            {
+                "id": "central_plant",
+                "members": [thermostat],
+                "min_run_minutes": plant.get("min_run_minutes", 15),
+                "min_off_minutes": plant.get("min_off_minutes", 5),
+            }
+        )
+    return groups
 
 
 def _room_of(run: RunData, eid: str) -> str | None:
@@ -225,9 +243,16 @@ def min_off_respected(run: RunData, tolerance_s: float = 45.0) -> list[Violation
 
 
 def target_never_empty(run: RunData) -> list[Violation]:
-    """A controlled room always has a resolved target unless forced off (#419)."""
+    """A controlled room always has a resolved target unless forced off (#419).
+
+    Under a central plant the room config may list no device at all (the house is run by
+    ``central_plant.thermostat_entity``); such a room still counts as controlled when the
+    house has a climate device in it, so the check does not silently pass.
+    """
     out: list[Violation] = []
-    controlled = {a for a, r in run.rooms_config().items() if r.get("devices") and not r.get("is_outdoor")}
+    rooms = run.rooms_config()
+    house_devices = {d.room for d in run.scenario.all_devices()}
+    controlled = {a for a, r in rooms.items() if not r.get("is_outdoor") and (r.get("devices") or a in house_devices)}
     reported: set[str] = set()
     for o in run.observer:
         if o["t"] < run.start + 120:

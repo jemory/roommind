@@ -1,4 +1,9 @@
-"""Device models: TRV/radiator, underfloor zone, split AC, central heat pump, heater, boiler."""
+"""Device models: TRV/radiator, underfloor zone, split AC, central heat pump, heater, boiler.
+
+``central_hvac`` is the North American forced-air plant built on the ``heat_pump``
+machinery: furnace heating, heat-pump cooling with a wet evaporator coil, and a blower
+that keeps recirculating the served rooms.
+"""
 
 from __future__ import annotations
 
@@ -8,13 +13,21 @@ from typing import Any
 
 from ..physics.psychro import LATENT_HEAT, abs_humidity
 from ..physics.zone import Gains
-from .base import CommandResult, DeviceEnv, SimDevice, approach, clamp
+from .base import CommandResult, DeviceEnv, DuctState, SimDevice, approach, clamp
 
 GROUND_TEMP_C = 12.0
 VALVE_TRAVEL_S = 120.0
 UFH_ACTUATOR_TRAVEL_S = 180.0
 COIL_TEMP_C = 10.0
 MAX_SUPPLY_C = 75.0
+# Forced-air defaults; a profile overrides any of them per device.
+CIRCULATION_ACH = 2.5  # blower circulation while the plant heats or cools
+FAN_CIRCULATION_ACH = 1.8  # blower circulation with neither burner nor compressor
+DOOR_CLOSED_SUPPLY_FACTOR = 0.75  # duct supply of a room behind a shut door
+DOOR_CLOSED_RETURN_FACTOR = 0.35  # its share of the return-plenum loop
+MAX_COIL_WATER_KG = 0.6  # film the evaporator holds before the rest drips to the pan
+COIL_EVAP_TAU_S = 600.0  # wet-coil re-evaporation into the duct air
+COIL_DRAIN_TAU_S = 1500.0  # passive drain into the condensate pan
 _VALVE_SERVICES = {"set_valve_opening_degree": "opening", "set_valve_closing_degree": "closing"}
 
 
@@ -446,23 +459,185 @@ class SplitAc(SimDevice):
 
 @dataclass
 class HeatPump(SimDevice):
-    """Central ducted heat pump behind a thermostat (Ecobee-like), range setpoint."""
+    """Central ducted heat pump behind a thermostat (Ecobee-like), range setpoint.
+
+    The air handler is part of the model: a blower moves the same air through the served
+    rooms (``serves_rooms`` besides its own room), the supply is split by
+    ``supply_shares``, and every room whose interior door is shut is throttled
+    (``door_closed_supply_factor``, default 0.75) while it is served. The evaporator
+    stays wet after a cooling run (``coil_water_kg``, capped at ``max_coil_water_kg``,
+    default 0.6 kg); with the compressor and the burner off, the blower re-evaporates that
+    film into the duct air (time constant ``coil_evap_tau_s``, 600 s) instead of draining
+    it (``coil_drain_tau_s``, 1500 s). That is the physics behind RoomMind's
+    ``WetCoilTracker``: humidity rises in every served room while only the fan runs.
+
+    ``furnace_heating`` swaps the compressor for a furnace on the heating side: constant
+    ``heat_capacity_w`` independent of outdoor temperature, no defrost cycle, and no COP
+    (the electric figure is the fuel-equivalent, ``furnace_efficiency``).
+    """
 
     model = "heat_pump"
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        self.running_mode: str | None = None
+        self.running_mode: str | None = None  # "heat" | "cool" while burner/compressor runs
         self.on_since = 0.0
         self.frost = 0.0
         self.defrost_until = -1e12
+        self.coil_water_kg = 0.0  # evaporator water film from condensation
+        self.coil_evap_kg_s = 0.0  # last tick's wet-coil re-evaporation
+        self.coil_drip_kg_s = 0.0  # last tick's condensate overflowing to the drain
+
+    # --- central air handler -------------------------------------------------------------
+
+    @property
+    def furnace_heating(self) -> bool:
+        """A furnace instead of the heat pump's compressor for heating."""
+        return bool(self.spec.params.get("furnace_heating", self.model == "central_hvac"))
+
+    @property
+    def duct_rooms(self) -> list[str]:
+        rooms = [self.room, *(self.spec.params.get("serves_rooms") or [])]
+        return list(dict.fromkeys(str(r) for r in rooms))
+
+    def blower_on(self) -> bool:
+        if not self.available or self.hvac_mode == "off":
+            return False
+        if self.running_mode is not None:
+            return True
+        return self.hvac_mode == "fan_only" or self.fan_mode == "on"
+
+    def circulating(self) -> bool:
+        """The blower runs, but neither the compressor nor the burner does."""
+        return self.blower_on() and self.running_mode is None
+
+    def _design_shares(self) -> dict[str, float]:
+        """Normalized design split over ``duct_rooms``; unlisted rooms share equally."""
+        rooms = self.duct_rooms
+        if not rooms:
+            return {}
+        configured = self.spec.params.get("supply_shares") or {}
+        equal = 1.0 / len(rooms)
+        raw = {r: max(0.0, float(configured.get(r, equal))) for r in rooms}
+        total = sum(raw.values())
+        if total <= 0:
+            return dict.fromkeys(rooms, equal)
+        return {r: v / total for r, v in raw.items()}
+
+    def supply_weights(self, env: DeviceEnv) -> dict[str, float]:
+        """Share of the unit's output each served room gets this tick.
+
+        A closed interior door throttles its room (``door_closed_supply_factor``); the
+        rest is renormalized, so shutting a door pushes the air to the other rooms
+        instead of losing it.
+        """
+        shares = self._design_shares()
+        factor = float(self.spec.params.get("door_closed_supply_factor", DOOR_CLOSED_SUPPLY_FACTOR))
+        raw = {r: s * (factor if r in env.closed_rooms else 1.0) for r, s in shares.items() if r in env.zones}
+        total = sum(raw.values())
+        if total <= 0:
+            return {}
+        return {r: v / total for r, v in raw.items()}
+
+    def duct_state(self) -> DuctState | None:
+        p = self.spec.params
+        if not self.blower_on():
+            return None
+        if len(self.duct_rooms) < 2 and "circulation_ach" not in p and self.model != "central_hvac":
+            return None  # one room, no configured circulation: nothing to mix
+        ach = (
+            float(p.get("fan_circulation_ach", FAN_CIRCULATION_ACH))
+            if self.circulating()
+            else float(p.get("circulation_ach", CIRCULATION_ACH))
+        )
+        return DuctState(
+            rooms=self.duct_rooms,
+            shares=self._design_shares(),
+            circulation_ach=ach,
+            circulating=self.circulating(),
+            door_closed_return_factor=float(p.get("door_closed_return_factor", DOOR_CLOSED_RETURN_FACTOR)),
+        )
+
+    # --- evaporator water film ------------------------------------------------------------
+
+    def _condense(self, kg: float, dt: float) -> None:
+        """Moisture pulled out of the duct air onto the coil; the overflow drips away."""
+        cap = float(self.spec.params.get("max_coil_water_kg", MAX_COIL_WATER_KG))
+        before = self.coil_water_kg
+        self.coil_water_kg = max(0.0, min(cap, before + kg))
+        self.coil_drip_kg_s = max(0.0, before + kg - self.coil_water_kg) / dt if dt > 0 else 0.0
+
+    def _wet_coil_evap(self, dt: float) -> float:
+        """Blow the retained film back into the duct air; returns kg/s re-evaporated."""
+        if self.coil_water_kg <= 0 or dt <= 0:
+            return 0.0
+        tau = max(1.0, float(self.spec.params.get("coil_evap_tau_s", COIL_EVAP_TAU_S)))
+        kg = min(self.coil_water_kg, self.coil_water_kg / tau * dt)
+        self.coil_water_kg -= kg
+        return kg / dt
+
+    def _coil_drain(self, dt: float) -> None:
+        """A stopped or dry coil lets the film run into the condensate pan."""
+        tau = max(1.0, float(self.spec.params.get("coil_drain_tau_s", COIL_DRAIN_TAU_S)))
+        self.coil_water_kg *= math.exp(-dt / tau)
+
+    # --- physics --------------------------------------------------------------------------
+
+    def _wanted(self, reading: float, mode: str, low: float, high: float) -> str | None:
+        h = float(self.spec.params.get("hysteresis_k", 0.5))
+        want: str | None = None
+        if mode in ("heat", "heat_cool", "auto"):
+            if reading <= low - h or (self.running_mode == "heat" and reading < low + h):
+                want = "heat"
+        if want is None and mode in ("cool", "heat_cool", "auto"):
+            if reading >= high + h or (self.running_mode == "cool" and reading > high - h):
+                want = "cool"
+        return want
+
+    def _call_stage(self, want: str | None, mode: str, env: DeviceEnv) -> None:
+        """Start/stop the burner or compressor stage.
+
+        ``off`` and ``fan_only`` stop at once: the thermostat was told to stop
+        conditioning, and ``fan_only`` means the air handler alone. Any other change of
+        the wanted stage waits for ``min_run_s`` (compressor/heat-exchanger protection).
+        """
+        if self.running_mode == want:
+            return
+        ran = env.now - self.on_since
+        commanded_stop = mode in ("off", "fan_only")
+        if self.running_mode is None or commanded_stop or ran >= float(self.spec.params.get("min_run_s", 300)):
+            self.running_mode = want
+            self.on_since = env.now
+
+    def _furnace_stage(self, dt: float, env: DeviceEnv) -> tuple[float, float, bool]:
+        """Heat and electric power of the furnace/burner stage, plus whether it defrosts."""
+        p = self.spec.params
+        cap = float(p.get("heat_capacity_w", 8000))
+        if self.furnace_heating:
+            # Constant output: a furnace does not lose capacity to outdoor temperature and
+            # has no outdoor coil, so no defrost cycle either.
+            return cap, cap / max(0.1, float(p.get("furnace_efficiency", 0.95))), False
+        defrosting = advance_frost(self, dt, env, True)
+        if defrosting:
+            return 0.0, 0.1 * cap, True
+        a, b = p.get("cop_heat", [2.8, 0.05])
+        return cap, cap / max(1.5, a + b * env.outdoor.temp_c), False
+
+    def _action(self, mode: str, defrosting: bool, circulating: bool) -> str:
+        p = self.spec.params
+        if mode == "off":
+            return "off"
+        if self.running_mode == "heat":
+            return str(p.get("defrost_action", "heating")) if defrosting else "heating"
+        if self.running_mode == "cool":
+            return "drying" if mode == "dry" else "cooling"
+        return "fan" if circulating else "idle"
 
     def _physics(self, dt: float, env: DeviceEnv) -> dict[str, Gains]:
         p = self.spec.params
         z = env.zone
         reading = z.t_air
         self.sensor_c = reading
-        h = float(p.get("hysteresis_k", 0.5))
         mode = self.hvac_mode if self.available else "off"
         low = (
             self.to_c(self.target_low)
@@ -474,45 +649,45 @@ class HeatPump(SimDevice):
             if mode in ("heat_cool", "auto") and self.target_high is not None
             else self.target_c
         )
-        want: str | None = None
-        if mode in ("heat", "heat_cool", "auto"):
-            if reading <= low - h or (self.running_mode == "heat" and reading < low + h):
-                want = "heat"
-        if want is None and mode in ("cool", "heat_cool", "auto"):
-            if reading >= high + h or (self.running_mode == "cool" and reading > high - h):
-                want = "cool"
-        if self.running_mode != want:
-            ran = env.now - self.on_since
-            if self.running_mode is None or mode == "off" or ran >= float(p.get("min_run_s", 300)):
-                self.running_mode = want
-                self.on_since = env.now
-        rooms = [self.room, *(p.get("serves_rooms") or [])]
+        self._call_stage(self._wanted(reading, mode, low, high), mode, env)
         heat_w = 0.0
         electric = 0.0
         moisture = 0.0
-        defrosting = advance_frost(self, dt, env, self.running_mode == "heat")
+        defrosting = False
         if self.running_mode == "heat":
-            heat_w = 0.0 if defrosting else float(p.get("heat_capacity_w", 8000))
-            a, b = p.get("cop_heat", [2.8, 0.05])
-            electric = (
-                (0.1 * float(p.get("heat_capacity_w", 8000)))
-                if defrosting
-                else heat_w / max(1.5, a + b * env.outdoor.temp_c)
-            )
+            heat_w, electric, defrosting = self._furnace_stage(dt, env)
         elif self.running_mode == "cool":
             q = float(p.get("cool_capacity_w", 7000))
-            electric = q / float(p.get("eer", 3.2))
             shr = float(p.get("shr", 0.7))
+            electric = q / float(p.get("eer", 3.2))
             heat_w = -q * shr
             moisture = -q * (1 - shr) / LATENT_HEAT
+            self._condense(q * (1 - shr) / LATENT_HEAT * dt, dt)
+        elif not self.furnace_heating:
+            advance_frost(self, dt, env, False)  # the outdoor coil thaws while stopped
+        self.coil_evap_kg_s = 0.0
+        circulating = self.circulating()
+        if circulating and self.coil_water_kg > 0:
+            # Wet-coil blowback: the film evaporates into the supply air, taking its
+            # latent heat out of the duct air and putting the water back into the rooms.
+            self.coil_evap_kg_s = self._wet_coil_evap(dt)
+            heat_w -= self.coil_evap_kg_s * LATENT_HEAT
+            moisture += self.coil_evap_kg_s
+        elif self.running_mode != "cool":
+            self._coil_drain(dt)  # blower off or a dry heating cycle: the pan, not the air
         self.active = self.running_mode is not None
-        heating_action = str(p.get("defrost_action", "heating")) if defrosting else "heating"
-        self.hvac_action = {"heat": heating_action, "cool": "cooling"}.get(
-            self.running_mode or "", "off" if mode == "off" else "idle"
-        )
-        self._account(dt, heat_w, electric + (40 if self.active else 3))
-        share = 1 / len(rooms)
-        return {r: Gains(conv_w=heat_w * share, moisture_kg_s=moisture * share) for r in rooms}
+        self.hvac_action = self._action(mode, defrosting, circulating)
+        blower_w = float(p.get("blower_w", 40.0)) if self.blower_on() else float(p.get("standby_w", 3.0))
+        self._account(dt, heat_w, electric + blower_w)
+        weights = self.supply_weights(env)
+        if not weights:
+            return {self.room: Gains(conv_w=heat_w, moisture_kg_s=moisture)}
+        gains: dict[str, Gains] = {}
+        for room, share in weights.items():
+            g = gains.setdefault(room, Gains())
+            g.conv_w += heat_w * share
+            g.moisture_kg_s += moisture * share
+        return gains
 
     def _model_state(self) -> dict[str, Any]:
         return {
@@ -520,6 +695,7 @@ class HeatPump(SimDevice):
             "on_since": self.on_since,
             "frost": self.frost,
             "defrost_until": self.defrost_until,
+            "coil_water_kg": self.coil_water_kg,
         }
 
     def _restore_model_state(self, data: dict[str, Any]) -> None:
@@ -527,6 +703,28 @@ class HeatPump(SimDevice):
         self.on_since = data.get("on_since", 0.0)
         self.frost = data.get("frost", 0.0)
         self.defrost_until = data.get("defrost_until", -1e12)
+        self.coil_water_kg = data.get("coil_water_kg", 0.0)
+
+
+@dataclass
+class CentralHVAC(HeatPump):
+    """North American central forced-air plant: furnace heat, heat-pump cool, blower.
+
+    One thermostat for the whole house. Heating is a furnace (constant output, no
+    defrost), cooling a heat pump with a wet evaporator coil, and the blower recirculates
+    the served rooms whether it conditions or not. ``heat_pump`` already carries the
+    mechanics; this class only supplies the forced-air defaults (fan modes, circulation
+    and wet-coil constants) so a profile can stay short.
+    """
+
+    model = "central_hvac"
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not self.spec.capabilities.get("fan_modes"):
+            # Every forced-air thermostat can run its air handler on its own.
+            self.fan_modes = ["auto", "on"]
+            self.fan_mode = "auto"
 
 
 @dataclass
@@ -622,6 +820,7 @@ MODELS: dict[str, type[SimDevice]] = {
     "ufh": Ufh,
     "ac": SplitAc,
     "heat_pump": HeatPump,
+    "central_hvac": CentralHVAC,
     "heater": Heater,
     "boiler": Boiler,
 }

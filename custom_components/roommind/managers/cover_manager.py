@@ -28,6 +28,11 @@ _LOGGER = logging.getLogger(__name__)
 # HA cover supported_features bit for SET_POSITION
 _SUPPORT_SET_POSITION = 4
 
+# Only entities of this domain accept the cover services below. A read-only
+# cover is a sensor (or a manual blind RoomMind must not move), so it reads a
+# position but is never commanded.
+_COVER_DOMAIN = "cover."
+
 
 def compute_shading_factor(
     positions: list[int],
@@ -37,6 +42,10 @@ def compute_shading_factor(
 
     HA convention: position 0 = fully closed, 100 = fully open.
     Returns 1.0 when fully open (no shading), (1-max_effectiveness) when fully closed.
+
+    *positions* may combine the motorized covers with the room's read-only
+    covers (manual blinds, 0..100 % sensors): the sun behind a hand-drawn blind
+    heats the room just the same, so both enter the mean.
     """
     if not positions:
         return 1.0
@@ -180,6 +189,10 @@ class CoverManager:
 
         Does NOT call HA services — caller handles that.
         Returns CoverDecision(changed=False) to hold current state.
+
+        ``cover_entity_ids`` holds the motorized covers RoomMind may command;
+        read-only covers (manual blinds, position sensors) never reach this
+        manager, they only enter the room's shading factor.
         """
         state = self._get_state(area_id)
         current = state.current_position
@@ -353,12 +366,19 @@ class CoverManager:
         target_position: int,
         cover_min_positions: dict[str, int] | None = None,
     ) -> None:
-        """Call HA cover service to set position on all configured cover entities."""
+        """Call HA cover service to set position on all configured cover entities.
+
+        Only ``cover.*`` entities are commanded: a sensor that reports a blind
+        position is a read-only cover, and a binary cover service call to it
+        would fail the whole group.
+        """
         position_eids: list[str] = []
         binary_open_eids: list[str] = []
         binary_close_eids: list[str] = []
 
         for eid in cover_entity_ids:
+            if not eid.startswith(_COVER_DOMAIN):
+                continue
             state = hass.states.get(eid)
             if state is None:
                 continue

@@ -1,9 +1,9 @@
-import { LitElement, html, nothing } from "lit";
+import { LitElement, html, css, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { repeat } from "lit/directives/repeat.js";
-import type { HomeAssistant, PriceStatus } from "../../types";
+import type { CentralPlantLive, HomeAssistant, PlantAction, PriceStatus } from "../../types";
 import { floorGroups, type AreaInfo } from "../../utils/dashboard";
-import { hasDevices } from "../../utils/room-state";
+import { isControlledZone } from "../../utils/room-state";
 import { localize, type TranslationKey } from "../../utils/localize";
 import { formatTempLocale, tempUnit } from "../../utils/temperature";
 import { VACATION_SENTINEL } from "../../utils/constants";
@@ -28,7 +28,30 @@ const PRICE_LEVEL_KEYS: Record<"cheap" | "normal" | "expensive", TranslationKey>
   expensive: "settings.price_level_expensive",
 };
 
-/** Rooms tab: house summary pills and the room cards, grouped by floor if wanted. */
+const ACTION_KEYS: Record<PlantAction, TranslationKey> = {
+  heating: "plant.action.heating",
+  cooling: "plant.action.cooling",
+  circulating: "plant.action.circulating",
+  idle: "plant.action.idle",
+};
+
+const ACTION_ICONS: Record<PlantAction, string> = {
+  heating: "mdi:fire",
+  cooling: "mdi:snowflake",
+  circulating: "mdi:fan",
+  idle: "mdi:circle-small",
+};
+
+const GUARD_KEYS: Record<string, TranslationKey> = {
+  min_run: "plant.guard.min_run",
+  min_off: "plant.guard.min_off",
+  min_fan: "plant.guard.min_fan",
+  changeover: "plant.guard.changeover",
+  exterior_open: "plant.guard.exterior_open",
+  wet_coil: "plant.guard.wet_coil",
+};
+
+/** Rooms tab: the Central HVAC status card, house summary pills and the room cards. */
 @customElement("rs-dashboard")
 export class RsDashboard extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
@@ -39,8 +62,138 @@ export class RsDashboard extends LitElement {
   @property({ type: String }) public controlMode: "mpc" | "bangbang" = "mpc";
   @property({ type: Boolean }) public climateControlActive = true;
   @property({ attribute: false }) public summary!: HouseSummary;
+  /** Live Central Plant status from rooms/list; null until the backend reports it. */
+  @property({ attribute: false }) public centralPlant: CentralPlantLive | null = null;
 
-  static styles = [tokens, dashboardStyles];
+  private _clearingOverride = false;
+
+  static styles = [
+    tokens,
+    dashboardStyles,
+    css`
+      .plant {
+        margin: 0 0 12px;
+        padding: 14px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .plant-head {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+      }
+
+      .plant-icon {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        flex: none;
+        display: grid;
+        place-items: center;
+        background: var(--rs-fill);
+        color: var(--secondary-text-color);
+        --mdc-icon-size: 22px;
+      }
+
+      .plant-icon.heating {
+        background: color-mix(in srgb, var(--rs-heat) 16%, transparent);
+        color: var(--rs-heat);
+      }
+
+      .plant-icon.cooling {
+        background: color-mix(in srgb, var(--rs-cool) 16%, transparent);
+        color: var(--rs-cool);
+      }
+
+      .plant-icon.circulating {
+        background: color-mix(in srgb, var(--rs-ok) 16%, transparent);
+        color: var(--rs-ok);
+      }
+
+      .plant-text {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .plant-title {
+        font-size: 15px;
+        font-weight: 500;
+        line-height: 1.3;
+      }
+
+      .plant-sub {
+        font-size: 12px;
+        color: var(--secondary-text-color);
+        line-height: 1.4;
+        overflow-wrap: anywhere;
+      }
+
+      .plant-temps {
+        display: flex;
+        gap: 16px;
+        flex: none;
+        font-size: 12px;
+        color: var(--secondary-text-color);
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .plant-temps span {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 4px;
+        white-space: nowrap;
+      }
+
+      .plant-temps b {
+        font-size: 16px;
+        font-weight: 400;
+        color: var(--primary-text-color);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .plant-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 14px;
+        font-size: 12px;
+        color: var(--secondary-text-color);
+        font-variant-numeric: tabular-nums;
+        align-items: center;
+      }
+
+      .plant-meta .driving {
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+
+      .plant-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+      }
+
+      .plant-chips ha-button {
+        --mdc-typography-button-font-size: 12px;
+        margin-left: auto;
+      }
+
+      .unconfigured .plant-title {
+        font-size: 14px;
+        font-weight: 500;
+      }
+
+      @media (max-width: 600px) {
+        .plant-temps {
+          justify-content: flex-start;
+        }
+      }
+    `,
+  ];
 
   render() {
     const l = this.hass.language;
@@ -53,7 +206,7 @@ export class RsDashboard extends LitElement {
     const hidden = new Set(this.hiddenRooms);
     const visible = this.infos.filter((i) => !hidden.has(i.area.area_id));
     if (visible.length === 0) {
-      return html`${this._renderPills(visible)}
+      return html`${this._renderPlant()}
         <div class="placeholder">
           <ha-icon icon="mdi:eye-off-outline"></ha-icon>
           <p>${localize("panel.all_hidden", l)}</p>
@@ -62,7 +215,7 @@ export class RsDashboard extends LitElement {
     }
     const groups = floorGroups(visible, this.hass, this.groupByFloor);
     return html`
-      ${this._renderPills(visible)}
+      ${this._renderPlant()} ${this._renderPills(visible)}
       ${groups.map(
         (g) => html`
           ${
@@ -91,13 +244,150 @@ export class RsDashboard extends LitElement {
     `;
   }
 
+  /** Crisp Central HVAC status card: plant action, temperatures, targets, drivers and guards. */
+  private _renderPlant() {
+    const l = this.hass.language;
+    const p = this.centralPlant;
+    // Older backends do not report the plant: leave the dashboard unchanged until they do.
+    if (!p) return nothing;
+    // Before the first coordinator cycle the payload is the stored config block, which has no
+    // `configured`/`action`: derive them so the banner does not flash "not configured".
+    const configured = p.configured ?? !!p.thermostat_entity;
+    const action: PlantAction = p.action ?? "idle";
+    const pausedRooms = p.exterior_paused_rooms ?? [];
+    if (!configured) {
+      return html`<ha-card class="plant unconfigured">
+        <div class="plant-head">
+          <span class="plant-icon" aria-hidden="true"><ha-icon icon="mdi:hvac"></ha-icon></span>
+          <div class="plant-text">
+            <div class="plant-title">${localize("plant.title", l)}</div>
+            <div class="plant-sub">${localize("plant.not_configured", l)}</div>
+          </div>
+          <ha-button @click=${this._openPlantSettings}>${localize("plant.set_up", l)}</ha-button>
+        </div>
+      </ha-card>`;
+    }
+    const unit = tempUnit(this.hass);
+    const fmt = (c: number | null) => (c == null ? "--" : formatTempLocale(c, this.hass, 0, 1));
+    const guardKey = p.guard_reason ? GUARD_KEYS[p.guard_reason] : undefined;
+    return html`<ha-card class="plant">
+      <div class="plant-head">
+        <span class="plant-icon ${action}" aria-hidden="true"
+          ><ha-icon .icon=${ACTION_ICONS[action]}></ha-icon
+        ></span>
+        <div class="plant-text">
+          <div class="plant-title">${localize(ACTION_KEYS[action], l)}</div>
+          <div class="plant-sub">${p.decision_reason || localize("plant.subtitle", l)}</div>
+        </div>
+        <div class="plant-temps">
+          <span>${localize("plant.house_ref", l)} <b>${fmt(p.house_ref_temp)}</b>${unit}</span>
+          <span>${localize("plant.thermostat", l)} <b>${fmt(p.thermostat_temp)}</b>${unit}</span>
+        </div>
+      </div>
+
+      <div class="plant-meta">
+        ${this._renderTargets(p, fmt, unit)}
+        <span class="driving">
+          ${localize("plant.driving_rooms", l)}:
+          <b
+            >${
+              (p.driving_rooms ?? []).length
+                ? p.driving_rooms.map((id) => this.hass.areas?.[id]?.name ?? id).join(", ")
+                : localize("plant.no_drivers", l)
+            }</b
+          >
+        </span>
+      </div>
+
+      ${this._renderChips(p, guardKey, pausedRooms)}
+    </ha-card>`;
+  }
+
+  private _renderTargets(p: CentralPlantLive, fmt: (c: number | null) => string, unit: string) {
+    const l = this.hass.language;
+    const band =
+      p.commanded_low != null && p.commanded_high != null && p.commanded_low !== p.commanded_high;
+    if (band) {
+      return html`<span class="target"
+        >${localize("plant.fallback_band", l)}
+        <b>${fmt(p.commanded_low)}–${fmt(p.commanded_high)} ${unit}</b></span
+      >`;
+    }
+    if (p.commanded_single != null) {
+      return html`<span class="target"
+        >${localize("plant.nudge", l)} <b>${fmt(p.commanded_single)} ${unit}</b></span
+      >`;
+    }
+    return html`<span class="target"
+      >${localize("plant.fallback_band", l)}
+      <b>${fmt(p.commanded_low)}–${fmt(p.commanded_high)} ${unit}</b></span
+    >`;
+  }
+
+  private _renderChips(
+    p: CentralPlantLive,
+    guardKey: TranslationKey | undefined,
+    pausedRooms: string[],
+  ) {
+    const l = this.hass.language;
+    const chips = [
+      p.wet_coil_locked
+        ? html`<rs-pill icon="mdi:water-alert" tone="warn"
+            >${localize("plant.chip.wet_coil", l)}</rs-pill
+          >`
+        : nothing,
+      p.guard_active
+        ? html`<rs-pill icon="mdi:shield-lock-outline" tone="warn"
+            >${localize("plant.chip.guard", l)}${
+              guardKey ? ` · ${localize(guardKey, l)}` : ""
+            }</rs-pill
+          >`
+        : nothing,
+      pausedRooms.length
+        ? html`<rs-pill icon="mdi:window-open-variant" tone="warn"
+            >${localize("plant.chip.exterior", l, { count: pausedRooms.length })}</rs-pill
+          >`
+        : nothing,
+      p.plant_override_active
+        ? html`<rs-pill icon="mdi:hand-back-right-outline" tone="ok"
+            >${localize("plant.chip.override", l)}${
+              p.plant_override_heat != null || p.plant_override_cool != null
+                ? ` · ${this._overrideText(p)}`
+                : ""
+            }</rs-pill
+          >`
+        : nothing,
+    ].filter((c) => c !== nothing);
+    const clear =
+      p.plant_override_active || p.plant_override_heat != null || p.plant_override_cool != null
+        ? html`<ha-button .disabled=${this._clearingOverride} @click=${this._clearOverride}
+            >${localize("plant.clear_override", l)}</ha-button
+          >`
+        : nothing;
+    if (!chips.length && clear === nothing) return nothing;
+    return html`<div class="plant-chips">${chips}${clear}</div>`;
+  }
+
+  private _overrideText(p: CentralPlantLive): string {
+    const unit = tempUnit(this.hass);
+    const fmt = (c: number) => `${formatTempLocale(c, this.hass, 0, 1)} ${unit}`;
+    if (p.plant_override_heat != null && p.plant_override_cool != null) {
+      return `${fmt(p.plant_override_heat)}–${fmt(p.plant_override_cool)}`;
+    }
+    const single = p.plant_override_heat ?? p.plant_override_cool;
+    return single == null ? "" : fmt(single);
+  }
+
   private _renderPills(visible: AreaInfo[]) {
     const l = this.hass.language;
     const s = this.summary;
-    // Rooms RoomMind controls: outdoor areas and rooms without devices only measure
-    const configured = visible.filter((i) => hasDevices(i.config) && !i.config?.is_outdoor);
+    // Rooms RoomMind controls: outdoor areas and rooms without a temperature sensor only measure
+    const configured = visible.filter((i) => isControlledZone(i.config));
     const heating = visible.filter((i) => i.config?.live?.mode === "heating").length;
     const cooling = visible.filter((i) => i.config?.live?.mode === "cooling").length;
+    const circulating = visible.filter(
+      (i) => i.config?.live?.mode === "circulating" || i.config?.live?.fan_circulating,
+    ).length;
     const mold = visible.filter(
       (i) =>
         i.config?.live?.mold_risk_level === "warning" ||
@@ -125,6 +415,11 @@ export class RsDashboard extends LitElement {
       cooling
         ? html`<rs-pill icon="mdi:snowflake" tone="cool"
             >${localize("panel.pill.cooling", l)} <b>${cooling}</b></rs-pill
+          >`
+        : nothing,
+      circulating
+        ? html`<rs-pill icon="mdi:fan"
+            >${localize("panel.pill.circulating", l)} <b>${circulating}</b></rs-pill
           >`
         : nothing,
       s.outdoorTemp != null
@@ -169,6 +464,30 @@ export class RsDashboard extends LitElement {
 
   private _requestEdit() {
     this.dispatchEvent(new CustomEvent("edit-requested", { bubbles: true, composed: true }));
+  }
+
+  private _openPlantSettings() {
+    this.dispatchEvent(
+      new CustomEvent("open-settings", {
+        detail: { category: "plant" },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  private async _clearOverride() {
+    if (this._clearingOverride) return;
+    this._clearingOverride = true;
+    try {
+      await this.hass.callWS({ type: "roommind/plant/clear_override" });
+      this.dispatchEvent(new CustomEvent("room-updated", { bubbles: true, composed: true }));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.debug("[RoomMind] clear plant override:", err);
+    } finally {
+      this._clearingOverride = false;
+    }
   }
 }
 

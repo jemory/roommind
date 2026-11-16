@@ -7,12 +7,11 @@ import type {
   HassEntityRegistryEntry,
   OverrideType,
   RoomConfig,
-  RoomLiveData,
   RoomMode,
 } from "../types";
 import { localize, type TranslationKey } from "./localize";
 import type { EffectiveOverride } from "./override";
-import { formatMinutes, formatNumber, formatRemaining } from "./format";
+import { formatNumber, formatRemaining } from "./format";
 import { VACATION_SENTINEL } from "./constants";
 import { serverNow } from "./server-clock";
 
@@ -53,6 +52,8 @@ export function getModeClass(mode: RoomMode | undefined): string {
       return "mode-heating";
     case "cooling":
       return "mode-cooling";
+    case "circulating":
+      return "mode-circulating";
     case "idle":
       return "mode-idle";
     default:
@@ -63,6 +64,7 @@ export function getModeClass(mode: RoomMode | undefined): string {
 const modeKeys: Record<RoomMode, TranslationKey> = {
   heating: "mode.heating",
   cooling: "mode.cooling",
+  circulating: "mode.circulating",
   idle: "mode.idle",
 };
 
@@ -73,31 +75,25 @@ export function formatMode(mode: RoomMode, language: string): string {
   return localize(modeKeys[mode], language);
 }
 
-/** Whole minutes until a Unix timestamp, floored at 1 so a badge never reads "0 min". */
-export function minutesLeft(until: number | null): number {
-  if (until == null) return 1;
-  return Math.max(1, Math.ceil((until * 1000 - serverNow()) / 60000));
-}
-
 /* ---------- Room kind, state and hints (dashboard card, later the room hero) ---------- */
 
 /**
  * What a room is from the dashboard's point of view:
- * - `controlled`: devices configured, live data present
- * - `waiting`: devices configured, no live data yet
+ * - `controlled`: an indoor Thermal Zone with a temperature sensor and live data
+ * - `waiting`: an indoor Thermal Zone configured, no live data yet
  * - `outdoor`: outdoor area (measurement only)
- * - `sensor`: no devices, but a sensor delivers temperature or humidity
+ * - `sensor`: no temperature sensor configured, but one delivers readings
  * - `unconfigured`: climate devices in the area, not set up
  * - `empty`: no climate devices in the area
  */
 export type RoomKind = "controlled" | "waiting" | "outdoor" | "sensor" | "unconfigured" | "empty";
 
-export function hasDevices(config: RoomConfig | null | undefined): boolean {
-  return (
-    (config?.devices?.length ?? 0) > 0 ||
-    (config?.thermostats?.length ?? 0) > 0 ||
-    (config?.acs?.length ?? 0) > 0
-  );
+/**
+ * In Central HVAC mode a room is an active controlled Thermal Zone as soon as it has a
+ * temperature sensor; RoomMind no longer needs per-room `devices[]` to control it.
+ */
+export function isControlledZone(config: RoomConfig | null | undefined): boolean {
+  return !!config && !config.is_outdoor && !!config.temperature_sensor;
 }
 
 export function roomKind(config: RoomConfig | null, climateEntityCount: number): RoomKind {
@@ -105,7 +101,7 @@ export function roomKind(config: RoomConfig | null, climateEntityCount: number):
   const hasReadings = !!live && (live.current_temp !== null || live.current_humidity !== null);
   if (config?.is_outdoor)
     return hasReadings ? "outdoor" : climateEntityCount > 0 ? "unconfigured" : "empty";
-  if (config && hasDevices(config)) return live ? "controlled" : "waiting";
+  if (isControlledZone(config)) return live ? "controlled" : "waiting";
   if (hasReadings) return "sensor";
   return climateEntityCount > 0 ? "unconfigured" : "empty";
 }
@@ -130,12 +126,15 @@ export function mpcStatus(
 export interface RoomStateInfo {
   key: TranslationKey;
   icon: string;
-  tone: "heat" | "cool" | "idle" | "off" | "paused";
+  tone: "heat" | "cool" | "circulating" | "idle" | "off" | "paused";
   /** Output in percent when partial (0 < p < 100), else null. */
   power: number | null;
 }
 
-/** Header state of a controlled room: heats/cools (with output), paused (window), off, standby. */
+/**
+ * Header state of a controlled room: heats/cools/circulates (with output), paused (window),
+ * off, standby.
+ */
 export function roomStateInfo(config: RoomConfig, climateControlActive: boolean): RoomStateInfo {
   const live = config.live;
   if (!isRoomControlled(config, climateControlActive)) {
@@ -156,6 +155,14 @@ export function roomStateInfo(config: RoomConfig, climateControlActive: boolean)
   if (live?.mode === "cooling") {
     return { key: "card.state.cooling", icon: "mdi:snowflake", tone: "cool", power };
   }
+  if (live?.mode === "circulating" || live?.fan_circulating) {
+    return {
+      key: "card.state.circulating",
+      icon: "mdi:fan",
+      tone: "circulating",
+      power: null,
+    };
+  }
   return { key: "mode.idle", icon: "mdi:circle-small", tone: "idle", power: null };
 }
 
@@ -163,10 +170,11 @@ export type RoomHintId =
   | "mold_risk"
   | "air_quality"
   | "window_open"
+  | "exterior_window_open"
+  | "interior_door_closed"
+  | "effective_temp"
   | "not_controlled"
   | "override"
-  | "compressor"
-  | "setback"
   | "presence_away"
   | "room_vacant"
   | "mold_prevention"
@@ -214,9 +222,9 @@ export function formatClock(unixS: number, language: string, now = Date.now()): 
 
 /**
  * Everything worth a hint for a room, most important first: mold risk, air quality, window
- * open, not controlled, override (with end), compressor protection, away / room empty, mold
- * prevention, price shift, setback, pre-heat, learning. Rooms without control only get the
- * measured ones (mold risk, air quality).
+ * open, not controlled, override (with end), away / room empty, mold prevention, price shift,
+ * pre-heat, learning. Rooms without control only get the measured ones (mold risk, air
+ * quality).
  */
 export function roomHints(
   config: RoomConfig | null,
@@ -245,6 +253,35 @@ export function roomHints(
       icon: "mdi:window-open-variant",
       severity: "info",
       key: "hero.window_open",
+    });
+  }
+  if (live.exterior_window_open && !live.window_open) {
+    hints.push({
+      id: "exterior_window_open",
+      icon: "mdi:window-open-variant",
+      severity: "warn",
+      key: "card.hint.exterior_window_open",
+    });
+  }
+  if (live.interior_door_open === false) {
+    hints.push({
+      id: "interior_door_closed",
+      icon: "mdi:door-closed",
+      severity: "info",
+      key: "card.hint.interior_door_closed",
+    });
+  }
+  if (
+    live.effective_temp != null &&
+    live.current_temp != null &&
+    Math.abs(live.effective_temp - live.current_temp) >= 0.3
+  ) {
+    hints.push({
+      id: "effective_temp",
+      icon: "mdi:thermometer-water",
+      severity: "info",
+      key: "card.hint.effective_temp",
+      params: { temp: `${ctx.formatTemp(live.effective_temp)} ${ctx.unit}` },
     });
   }
   if (!isRoomControlled(config, ctx.climateControlActive)) {
@@ -289,18 +326,6 @@ export function roomHints(
       });
     }
   }
-  if (live.compressor_protection_until != null) {
-    hints.push({
-      id: "compressor",
-      icon: "mdi:timer-sand",
-      severity: "info",
-      key:
-        live.compressor_protection_reason === "min_run"
-          ? "card.compressor_min_run"
-          : "card.compressor_min_off",
-      params: { time: formatMinutes(minutesLeft(live.compressor_protection_until), ctx.language) },
-    });
-  }
   if (live.presence_away) {
     hints.push({
       id: "presence_away",
@@ -339,8 +364,6 @@ export function roomHints(
       },
     });
   }
-  const setback = setbackHint(live, ctx.language);
-  if (setback) hints.push(setback);
   if (live.preheat && live.mode === live.preheat.mode) {
     const cooling = live.preheat.mode === "cooling";
     hints.push({
@@ -370,26 +393,6 @@ export function roomHints(
     });
   }
   return hints;
-}
-
-/**
- * Devices kept on at their setback target while the room is idle (#509). The time is the
- * earliest switch-off; past it the plan keeps the device as long as it expects a run.
- */
-export function setbackHint(live: RoomLiveData, language: string): RoomHint | null {
-  if (!live.setback?.devices.length || live.mode !== "idle") return null;
-  const until = live.setback.until;
-  return {
-    id: "setback",
-    icon: "mdi:thermometer-chevron-down",
-    severity: "info",
-    ...(until != null && until * 1000 > serverNow()
-      ? {
-          key: "card.hint.setback_until",
-          params: { time: formatMinutes(minutesLeft(until), language) },
-        }
-      : { key: "card.hint.setback" }),
-  };
 }
 
 /** Stale or polluted air (#267): the CO2 reading when that is the reason, and whether RoomMind ventilates. */

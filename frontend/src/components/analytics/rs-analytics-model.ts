@@ -137,6 +137,7 @@ export class RsAnalyticsModel extends LitElement {
             ${this._mpcRunning() ? this._renderNow() : this._renderStages()}
           </div>
           <div class="tiles">${this._tiles().map((t) => this._renderTile(t))}</div>
+          ${this._renderOccupancyTrend()}
         </div>
       </rs-list-card>
     `;
@@ -422,16 +423,24 @@ export class RsAnalyticsModel extends LitElement {
         value: hasHeated && model ? rate(model.Q_heat) : null,
       });
     }
-    if (canHeat && hasHeated && m?.afterglow_k != null) {
+    // Central HVAC: how strongly the blower mixes house air into the room and how strongly
+    // the room exchanges heat with the rest of the house.
+    if (m?.fan_mix_rate != null) {
       tiles.push({
-        id: "afterglow",
-        icon: "mdi:radiator",
-        value: m.afterglow_learned ? this._afterglowValue(m.afterglow_k) : null,
-        detail: m.afterglow_learned
-          ? localize("analytics.afterglow_sub", l, {
-              time: formatMinutes(m.afterglow_minutes ?? 0, l),
-            })
-          : localize("analytics.afterglow_unmeasured", l),
+        id: "fan_mix",
+        icon: "mdi:fan",
+        value: m.fan_mix_learned ? formatNumber(m.fan_mix_rate, this.hass, 2) : null,
+        detail: m.fan_mix_learned ? undefined : localize("analytics.fan_mix_unmeasured", l),
+      });
+    }
+    if (m?.house_coupling != null) {
+      tiles.push({
+        id: "house_coupling",
+        icon: "mdi:home-thermometer",
+        value: m.house_coupling_learned ? formatNumber(m.house_coupling, this.hass, 2) : null,
+        detail: m.house_coupling_learned
+          ? undefined
+          : localize("analytics.house_coupling_unmeasured", l),
       });
     }
     if (canCool) {
@@ -506,6 +515,34 @@ export class RsAnalyticsModel extends LitElement {
     };
   }
 
+  /** 24 h occupancy probability as a compact bar strip, only when the backend learned one. */
+  private _renderOccupancyTrend() {
+    const trend = this.data?.model?.occupancy_trend_24h;
+    if (!trend?.length) return nothing;
+    const l = this.language;
+    const max = Math.max(...trend, 0.0001);
+    return html`<div class="trend">
+      <div class="trend-label">
+        ${localize("analytics.model.occupancy_trend", l)}
+        <rs-info-icon .text=${localize("analytics.info.occupancy_trend", l)}></rs-info-icon>
+      </div>
+      <div
+        class="trend-bars"
+        role="img"
+        aria-label=${localize("analytics.model.occupancy_trend", l)}
+      >
+        ${trend.map(
+          (v, i) =>
+            html`<span
+              class="trend-bar"
+              style="height:${Math.max(4, Math.round((v / max) * 100))}%"
+              title=${`${String(i).padStart(2, "0")}:00 · ${formatPercent(Math.round(v * 100), this.hass)}`}
+            ></span>`,
+        )}
+      </div>
+    </div>`;
+  }
+
   private _renderTile(t: Tile) {
     const l = this.language;
     return html`<rs-stat-tile
@@ -525,15 +562,6 @@ export class RsAnalyticsModel extends LitElement {
   /** A temperature difference in the user's unit ("0,5 °C", "0.9 °F"). */
   private _delta(kelvin: number): string {
     return `${formatNumber(toDisplayDelta(kelvin, this.hass), this.hass, 1)} ${tempUnit(this.hass)}`;
-  }
-
-  private _afterglowValue(kelvin: number): string {
-    const value = toDisplayDelta(kelvin, this.hass);
-    const unit = tempUnit(this.hass);
-    // Rounded to "+0.0" it read like a broken value: light radiators store almost nothing
-    return value < 0.05
-      ? `< ${formatNumber(0.1, this.hass, 1)} ${unit}`
-      : `+${formatNumber(value, this.hass, 1)} ${unit}`;
   }
 
   static styles = [
@@ -734,6 +762,33 @@ export class RsAnalyticsModel extends LitElement {
         font-weight: 500;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
+      }
+
+      .trend {
+        margin-top: var(--rs-space-4);
+      }
+
+      .trend-label {
+        display: flex;
+        align-items: center;
+        gap: var(--rs-space-1);
+        margin-bottom: var(--rs-space-2);
+        font-size: var(--rs-font-sm);
+        color: var(--secondary-text-color);
+      }
+
+      .trend-bars {
+        display: flex;
+        align-items: flex-end;
+        gap: 2px;
+        height: 40px;
+      }
+
+      .trend-bar {
+        flex: 1;
+        min-width: 2px;
+        border-radius: 2px 2px 0 0;
+        background: color-mix(in srgb, var(--primary-color) 55%, transparent);
       }
 
       .tiles {

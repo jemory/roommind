@@ -13,6 +13,7 @@ from .errors import ScenarioError
 from .model import (
     CoverSpec,
     DeviceSpec,
+    InteriorDoorSpec,
     Location,
     PersonSpec,
     RoomSpec,
@@ -30,13 +31,23 @@ SCENARIO_DIR = SIM_ROOT / "scenarios"
 _ENTITY_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
 _DEVICE_KEYS = {"entity_id", "profile", "name"}
 _HELPER_DOMAINS = {"schedule", "input_boolean", "input_number", "input_select", "template"}
-DEVICE_MODELS = {"trv", "ac", "heat_pump", "heater", "boiler", "ufh"}
+DEVICE_MODELS = {"trv", "ac", "heat_pump", "central_hvac", "heater", "boiler", "ufh"}
 SENSOR_KINDS = {"temperature", "humidity", "occupancy"}
 
 # Timeline actions and their required arguments; implementations live in simhome.actions.
+# The underscore spellings are aliases of the dotted ones (open_window -> window.open).
+_DOOR_ACTIONS = {"door.open", "door.close"}
+_ALIASES = {
+    "open_window": "window.open",
+    "close_window": "window.close",
+    "open_door": "door.open",
+    "close_door": "door.close",
+}
 ACTIONS: dict[str, set[str]] = {
     "window.open": {"entity_id"},
     "window.close": {"entity_id"},
+    "door.open": set(),
+    "door.close": set(),
     "person.leave": {"person"},
     "person.arrive": {"person"},
     "occupancy.set": {"room", "count"},
@@ -57,6 +68,7 @@ ACTIONS: dict[str, set[str]] = {
     "clock.pause": set(),
     "mark": {"label"},
 }
+ACTIONS |= {alias: set(ACTIONS[target]) for alias, target in _ALIASES.items()}
 
 
 def deep_merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
@@ -251,9 +263,32 @@ def _room(area_id: str, rdata: dict[str, Any], building: str, floors: dict[str, 
         sensors=sensors,
         windows=windows,
         covers=covers,
+        interior_doors=[
+            _interior_door(area_id, i, draw, where) for i, draw in enumerate(rdata.get("interior_doors") or [])
+        ],
         neighbors=dict(rdata.get("neighbors") or {}),
         initial=dict(rdata.get("initial") or {}),
     )
+
+
+def _interior_door(room: str, index: int, ddata: dict[str, Any], where: str) -> InteriorDoorSpec:
+    """``{sensor: binary_sensor.office_door, neighbor: living_room, open: true}``.
+
+    The neighbour is validated with the rest of the scenario (all rooms are known then).
+    """
+    path = f"{where}.interior_doors[{index}]"
+    if not isinstance(ddata, dict):
+        raise ScenarioError("interior door must be a mapping", path)
+    data = dict(ddata)
+    sensor = data.pop("sensor", None)
+    _check_entity_id(sensor, "binary_sensor", f"{path}.sensor")
+    neighbor = data.pop("neighbor", None)
+    if not isinstance(neighbor, str) or not neighbor:
+        raise ScenarioError("interior door needs the neighbour room behind it", f"{path}.neighbor")
+    initial_open = bool(data.pop("open", True))
+    if data:
+        raise ScenarioError(f"unknown interior door keys {sorted(data)}", path)
+    return InteriorDoorSpec(sensor=sensor, room=room, neighbor=neighbor, open=initial_open)
 
 
 def _device(room: str, ddata: dict[str, Any], where: str) -> DeviceSpec:
@@ -317,12 +352,16 @@ def _timeline_item(i: int, item: dict[str, Any], start: float, tz: str) -> Timel
     if not isinstance(item, dict) or "at" not in item or "do" not in item:
         raise ScenarioError("timeline item needs 'at' and 'do'", where)
     args = {k: v for k, v in item.items() if k not in ("at", "do")}
-    action = str(item["do"])
+    action = _ALIASES.get(str(item["do"]), str(item["do"]))
     if action not in ACTIONS:
         raise ScenarioError(f"unknown action {action!r} (known: {', '.join(sorted(ACTIONS))})", where)
     missing = ACTIONS[action] - args.keys()
     if missing:
         raise ScenarioError(f"action {action} needs {sorted(missing)}", where)
+    if action in _DOOR_ACTIONS and not ({"room", "entity_id"} & args.keys()):
+        raise ScenarioError(f"action {action} needs room or entity_id", where)
+    if action in _DOOR_ACTIONS and "for" not in args and "duration" in args:
+        args["for"] = args.pop("duration")  # a door action may say `duration` like a service call
     if "for" in args:
         args["for"] = parse_duration(args["for"], f"{where}.for")
     return TimelineItem(index=i, at=parse_at(item["at"], start, tz, where), action=action, args=args)
@@ -356,6 +395,7 @@ def _validate(scn: Scenario) -> None:
         [d.entity_id for d in scn.all_devices()]
         + [s.entity_id for s in scn.all_sensors()]
         + [w.sensor for r in scn.rooms.values() for w in r.windows if w.sensor]
+        + [d.sensor for r in scn.rooms.values() for d in r.interior_doors]
     )
     if duplicates:
         raise ScenarioError(f"entity ids defined twice: {sorted(duplicates)}", "house")
@@ -386,6 +426,10 @@ def _validate(scn: Scenario) -> None:
     settings = rm.get("settings") or {}
     for key in ("outdoor_temp_sensor", "outdoor_humidity_sensor", "weather_entity"):
         check(settings.get(key), f"roommind.settings.{key}")
+    # With a central plant one thermostat runs the house and the rooms may list no device.
+    plant = settings.get("central_plant") or {}
+    if isinstance(plant, dict):
+        check(plant.get("thermostat_entity"), "roommind.settings.central_plant.thermostat_entity")
     for i, eid in enumerate(settings.get("presence_persons") or []):
         check(eid, f"roommind.settings.presence_persons[{i}]")
     for i, group in enumerate(settings.get("compressor_groups") or []):
@@ -408,6 +452,12 @@ def _validate(scn: Scenario) -> None:
         for other in room.neighbors:
             if other not in scn.rooms:
                 raise ScenarioError(f"unknown neighbor room {other!r}", f"house.rooms.{room.area_id}.neighbors")
+        for i, door in enumerate(room.interior_doors):
+            where = f"house.rooms.{room.area_id}.interior_doors[{i}]"
+            if door.neighbor == room.area_id:
+                raise ScenarioError("an interior door needs two different rooms", where)
+            if door.neighbor not in scn.rooms:
+                raise ScenarioError(f"unknown neighbor room {door.neighbor!r}", f"{where}.neighbor")
 
 
 def _duplicates(items: list[str]) -> set[str]:

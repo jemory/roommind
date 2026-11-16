@@ -1,41 +1,57 @@
 name: restart-resume
 description: >
-  HA restarts mid-run. Clock and world must continue where they stopped; timeline items
-  run exactly once; window sensors are unavailable for a while after the restart (#437, #181).
+  HA restarts mid-run in a house run by one Central Plant. Clock and world must continue
+  where they stopped; timeline items run exactly once; window sensors are unavailable for a
+  while after the restart (#437, #181). The open window pauses the whole plant through the
+  exterior gate.
 refs: [437, 181]
-tags: [infra]
+tags: [infra, central-plant]
 start: 2026-01-12T00:00
 duration: 2d
-location: {latitude: 52.5, longitude: 13.4, time_zone: Europe/Berlin}
+location: {latitude: 40.7, longitude: -74.0, time_zone: America/New_York, unit_system: us_customary, country: US}
 weather: {profile: temperate}
 house:
-  building: bestand_teilsaniert
-  outdoor:
-    sensors: {temperature: sensor.aussen_temp}
+  building: us_wood_frame
+  outdoor: {sensors: {temperature: sensor.outdoor_temp}}
   rooms:
-    buero:
-      name: Büro
+    living_room:
+      name: Living room
+      floor_area_m2: 28
+      exterior_wall_m2: 18
       initial: {temperature: 20.0}
-      windows: [{orientation: E, area_m2: 1.5, sensor: binary_sensor.buero_fenster}]
+      windows: [{orientation: S, area_m2: 3, sensor: binary_sensor.living_room_window}]
       devices:
-        - {entity_id: climate.buero_trv, profile: sonoff_trvzb}
+        - {entity_id: climate.central_hvac, profile: central_furnace_hp, heat_capacity_w: 7000}
       sensors:
-        temperature: {entity_id: sensor.buero_temp, unavailable_after_start_s: 90}
+        temperature: {entity_id: sensor.living_room_temp, unavailable_after_start_s: 90}
 roommind:
-  settings: {outdoor_temp_sensor: sensor.aussen_temp}
+  settings:
+    outdoor_temp_sensor: sensor.outdoor_temp
+    weather_entity: weather.simhome
+    central_plant:
+      thermostat_entity: climate.central_hvac
+      nudge_delta_c: 1.5
+      max_nudge_headroom_c: 3.0
+      fallback_heat_c: 16.5
+      fallback_cool_c: 27.0
+      min_deadband_c: 2.5
+      min_run_minutes: 10
+      min_off_minutes: 5
+      exterior_open_policy: pause_unless_door_closed
   rooms:
-    buero:
-      devices: [{entity_id: climate.buero_trv, type: trv}]
-      temperature_sensor: sensor.buero_temp
-      window_sensors: [binary_sensor.buero_fenster]
+    living_room:
+      temperature_sensor: sensor.living_room_temp
+      exterior_window_sensors: [binary_sensor.living_room_window]
       climate_mode: heat_only
-      comfort_temp: 21.0
+      comfort_heat: 21.0
+      eco_heat: 17.0
 timeline:
   - {at: "+1d", do: ha.restart}
-  - {at: "+1d1h", do: window.open, entity_id: binary_sensor.buero_fenster, for: 20m}
+  - {at: "+1d1h", do: window.open, entity_id: binary_sensor.living_room_window, for: 20m}
   - {at: "+1d2h", do: mark, label: after restart}
 expect:
-  - {check: "room.buero.window_open == true", at: "+1d1h05m", label: window seen after restart}
-  - {check: "room.buero.mode == 'idle'", at: "+1d1h10m", label: paused while open}
+  - {check: "room.living_room.window_open == true", at: "+1d1h05m", label: window seen after restart}
+  - {check: "room.living_room.mode == 'idle'", at: "+1d1h10m", label: paused while open}
   - {invariant: window_open_pauses}
   - {invariant: target_never_empty}
+  - {invariant: no_rejected_commands}

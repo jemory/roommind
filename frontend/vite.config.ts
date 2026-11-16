@@ -1,10 +1,10 @@
 import { defineConfig } from "vite";
-import { resolve } from "path";
+import { resolve } from "node:path";
 
 export default defineConfig({
   build: {
     lib: {
-      entry: resolve(__dirname, "src/main.ts"),
+      entry: resolve(import.meta.dirname, "src/main.ts"),
       name: "RoomMindPanel",
       formats: ["iife"],
       fileName: () => "roommind-panel.js",

@@ -4,7 +4,21 @@
 
 export type ClimateMode = "auto" | "heat_only" | "cool_only";
 
-export type RoomMode = "idle" | "heating" | "cooling";
+/** Central Plant action; rooms report the plant action that drives them. */
+export type PlantAction = "idle" | "heating" | "cooling" | "circulating";
+
+/** Kept for the existing room widgets: a room's mode is the plant action that covers it. */
+export type RoomMode = PlantAction;
+
+/** How a room's occupancy sensors are interpreted. */
+export type OccupancyMode =
+  "reactive_and_trend" | "schedule_assumed_when_on" | "follow_schedule" | "guardrail_only";
+
+/** What an open exterior opening does to the whole-home plant. */
+export type ExteriorOpenPolicy = "pause_unless_door_closed" | "pause_always" | "exclude_room_only";
+
+/** Which sides the electricity price may shift. */
+export type PriceShiftModes = "cool_only" | "both";
 
 export type OverrideType = "boost" | "eco" | "custom";
 
@@ -29,9 +43,9 @@ export interface RoomLiveData {
   target_temp: number | null;
   heat_target: number | null;
   cool_target: number | null;
-  mode: RoomMode;
+  mode: PlantAction;
   heating_power: number; // 0-100
-  device_setpoint: number | null; // Device target temp in Full Control mode
+  device_setpoint: number | null; // Central thermostat's commanded setpoint
   override_active: boolean;
   override_type: OverrideType | null;
   override_heat: number | null;
@@ -44,6 +58,21 @@ export interface RoomLiveData {
   mpc_active: boolean;
   presence_away: boolean;
   occupancy_vacant?: boolean;
+  /** Room Priority weight and occupancy probability from the plant optimization. */
+  priority_weight?: number | null;
+  occupancy_probability?: number | null;
+  /** Minutes of sustained occupancy expected/observed; drives the assumed-presence modes. */
+  occupancy_dwell?: number | null;
+  /** Effective temperature (dry-bulb corrected for humidity), null without humidity. */
+  effective_temp?: number | null;
+  /** Closed interior door reduces the room's air exchange with the house. */
+  interior_door_open?: boolean;
+  /** An exterior window or door of the room is open. */
+  exterior_window_open?: boolean;
+  /** The plant is circulating air into the room right now. */
+  fan_circulating?: boolean;
+  /** Learned blower coupling rate into this room, null before it is learned. */
+  beta_fan_rate?: number | null;
   /** Air quality readings (#267), null without sensor or reading. */
   co2?: number | null;
   voc?: number | null;
@@ -61,8 +90,6 @@ export interface RoomLiveData {
   price_level?: "cheap" | "normal" | "expensive" | null;
   /** Stricter target a running pre-heat (pre-cool) aims at and when it starts (Unix s). */
   preheat?: { mode: "heating" | "cooling"; target: number; at: number } | null;
-  /** Devices kept on at their setback target while the room is idle; `until` = earliest switch-off (Unix s). */
-  setback?: { devices: string[]; until: number | null } | null;
   mold_prevention_delta: number;
   blind_position: number | null;
   cover_auto_paused: boolean;
@@ -70,19 +97,11 @@ export interface RoomLiveData {
   cover_forced_reason: string;
   cover_reason?: string;
   active_cover_schedule_index: number;
-  active_heat_sources: string | null;
   learning_paused_reason: "outdoor_unavailable" | null;
   /** Model updates so far (one per ~3 min of learning). */
   n_observations?: number;
   /** `n_observations` when "learn faster" was last used, null if never (counts the fade). */
   boost_applied_at?: number | null;
-  compressor_protection_active: boolean;
-  compressor_protection_reason: "min_off" | "min_run" | null;
-  compressor_protection_until: number | null;
-  coil_dry_active: boolean;
-  coil_dry_phase: "drain" | "blow" | null;
-  coil_dry_until: number | null;
-  coil_dry_entities: string[];
   schedule_temp_warnings: ScheduleTempWarning[];
   /** Last 6 h of room temperature, `[unix_ts, temp, target]`, oldest first (dashboard cards). */
   recent_temps?: [number, number | null, number | null][];
@@ -96,26 +115,78 @@ export interface ScheduleTempWarning {
   value: string; // the offending raw value; may not be numeric
 }
 
-export type DeviceType = "trv" | "ac";
-export type DeviceRole = "primary" | "secondary" | "auto";
+/** One shared forced-air plant: thermostat, guards and fallback band. */
+export interface CentralPlantConfig {
+  thermostat_entity: string;
+  thermostat_area_id: string;
+  nudge_delta_c: number;
+  max_nudge_headroom_c: number;
+  fallback_heat_c: number;
+  fallback_cool_c: number;
+  min_deadband_c: number;
+  circulate_fan_mode: string;
+  idle_fan_mode: string;
+  min_run_minutes: number;
+  min_off_minutes: number;
+  min_fan_minutes: number;
+  changeover_minutes: number;
+  follow_thermostat_setpoint: boolean;
+  thermostat_override_hours: number;
+  exterior_open_policy: ExteriorOpenPolicy;
+  humidity_comfort_enabled: boolean;
+  dehumidify_rh_threshold: number;
+  max_dehumidify_overcool_c: number;
+  wet_coil_lockout_minutes: number;
+  wet_coil_max_rh: number;
+  price_shift_modes: PriceShiftModes;
+}
 
-export interface DeviceConfig {
-  entity_id: string;
-  type: DeviceType;
-  role: DeviceRole;
-  heating_system_type?: string;
-  idle_action?: "off" | "fan_only" | "setback" | "low"; // default "off"
-  idle_fan_mode?: string; // default "low"
-  setback_auto_off?: boolean; // setback ends in off after an hour without demand, default off (#255)
-  setpoint_mode?: "proportional" | "direct"; // default "proportional"
-  setpoint_offset?: number; // °C added to the room target in direct mode, default 0
-  coil_dry?: "inherit" | "on" | "off"; // default "inherit"
-  coil_dry_minutes?: number; // 0 = inherit global
-  coil_dry_mode?: "" | "fan_only" | "dry"; // "" = inherit global
-  coil_dry_fan_mode?: string; // "" = inherit global, "__keep__" = keep current
-  valve_opening_entity?: string; // number entity for direct valve opening degree (0-100%)
-  valve_closing_entity?: string; // number entity for direct valve closing degree (0-100%)
-  valve_closing_mode?: "closing_degree" | "idle_opening"; // idle_opening: the second entity is the opening while idle (SONOFF TRV-ZBT)
+/** Live status of the Central Plant as `roommind/rooms/list` reports it. */
+export interface CentralPlantLive {
+  configured: boolean;
+  thermostat_entity: string;
+  thermostat_area_id: string;
+  /** What the whole-home optimizer chose. */
+  action: PlantAction;
+  commanded_action: PlantAction;
+  /** What the equipment reports (or the command while it has no feedback). */
+  display_action?: PlantAction;
+  observed_hvac_action: string | null;
+  fan_circulating: boolean;
+  climate_mode?: ClimateMode;
+  thermostat_temp: number | null;
+  house_ref_temp: number | null;
+  /** The bounded setpoints the actuator holds on the wall thermostat. */
+  commanded_low: number | null;
+  commanded_high: number | null;
+  commanded_single: number | null;
+  legal_actions?: PlantAction[];
+  forced_action?: PlantAction | null;
+  driving_rooms: string[];
+  decision_reason: string;
+  guard_active: boolean;
+  guard_reason: string | null;
+  guard_until: number | null;
+  wet_coil_charge: number;
+  wet_coil_locked: boolean;
+  paused?: boolean;
+  blocking_rooms?: string[];
+  exterior_paused_rooms: string[];
+  plant_override_active: boolean;
+  plant_override_heat: number | null;
+  plant_override_cool: number | null;
+  plant_override_until: number | null;
+  mpc_active?: boolean;
+  preheat?: Record<string, { mode: "heating" | "cooling"; target: number; at: number }>;
+  actions?: PlantAction[];
+  outdoor_temp?: number | null;
+  outdoor_source?: string;
+  startup_waiting?: boolean;
+  all_force_off?: boolean;
+  any_override?: boolean;
+  price_level?: "cheap" | "normal" | "expensive" | null;
+  /** The stored central-plant configuration block. */
+  plant?: CentralPlantConfig;
 }
 
 export type ConflictResolution =
@@ -141,14 +212,15 @@ export interface CompressorGroup {
 
 export interface RoomConfig {
   area_id: string;
-  thermostats: string[];
-  acs: string[];
-  devices?: DeviceConfig[];
   temperature_sensor: string;
   humidity_sensor: string;
   occupancy_sensors?: string[];
   occupancy_eco_enabled?: boolean;
   occupancy_eco_delay?: number;
+  /** How the occupancy sensors are interpreted; replaces the eco-only flag. */
+  occupancy_mode?: OccupancyMode;
+  /** Minutes of sustained occupancy before the room counts as occupied. */
+  occupancy_dwell_minutes?: number;
   co2_sensor?: string;
   /** ppm; good again below 80 % of it. */
   co2_threshold?: number;
@@ -160,10 +232,17 @@ export interface RoomConfig {
   preheat_enabled?: boolean;
   /** K the schedule target may move with the electricity price, 0 = off. */
   price_shift?: number;
-  follow_device_setpoint?: boolean;
+  /** Exterior windows and doors; the canonical field, mirrored as `window_sensors`. */
+  exterior_window_sensors?: string[];
+  /** Legacy alias of `exterior_window_sensors`, kept for older stored rooms. */
   window_sensors: string[];
   window_open_delay: number;
   window_close_delay: number;
+  /** Interior doors that gate the room's coupling to the rest of the house. */
+  interior_door_sensors?: string[];
+  interior_door_delay?: number;
+  /** Scaling of the door coupling when the interior door is closed (0..1). */
+  door_closed_mix_factor?: number;
   climate_mode: ClimateMode;
   schedules: ScheduleEntry[];
   schedule_selector_entity: string;
@@ -179,8 +258,9 @@ export interface RoomConfig {
   override_type?: OverrideType | null;
   presence_persons?: string[];
   display_name?: string;
-  heating_system_type?: string;
   covers?: string[];
+  /** Blinds RoomMind may only position observations for; it never drives them. */
+  read_only_covers?: string[];
   covers_auto_enabled?: boolean;
   covers_deploy_threshold?: number;
   covers_min_position?: number;
@@ -198,13 +278,6 @@ export interface RoomConfig {
   cover_min_positions?: Record<string, number>;
   ignore_presence?: boolean;
   is_outdoor?: boolean;
-  valve_protection_exclude?: string[];
-  heat_source_orchestration?: boolean;
-  heat_source_primary_delta?: number;
-  heat_source_outdoor_threshold?: number;
-  heat_source_ac_min_outdoor?: number;
-  /** Orchestration: expensive electricity prefers the primary source, cheap the AC. */
-  heat_source_price_aware?: boolean;
   climate_control_enabled?: boolean;
   live?: RoomLiveData;
 }
@@ -242,14 +315,6 @@ export interface GlobalSettings {
   presence_away_action?: "eco" | "off";
   presence_clears_override?: boolean;
   schedule_off_action?: "eco" | "off";
-  valve_protection_enabled?: boolean;
-  valve_protection_interval_days?: number;
-  coil_dry_enabled?: boolean;
-  coil_dry_minutes?: number;
-  coil_dry_mode?: "fan_only" | "dry";
-  coil_dry_fan_mode?: string;
-  coil_dry_min_cooling_minutes?: number;
-  coil_dry_drain_minutes?: number;
   mold_detection_enabled?: boolean;
   mold_humidity_threshold?: number;
   mold_f_rsi?: number;
@@ -261,7 +326,8 @@ export interface GlobalSettings {
   mold_prevention_intensity?: "light" | "medium" | "strong";
   mold_prevention_notify_enabled?: boolean;
   mold_prevention_notify_targets?: NotificationTarget[];
-  compressor_groups?: CompressorGroup[];
+  /** The single shared forced-air plant (thermostat, guards, fallback band). */
+  central_plant?: CentralPlantConfig;
   room_order?: string[];
   group_by_floor?: boolean;
   boost_applied_at?: Record<string, number>;
@@ -332,11 +398,14 @@ export interface AnalyticsDataPoint {
   room_temp: number | null;
   outdoor_temp: number | null;
   target_temp: number | null;
-  mode: string;
+  /** What the room did at this sample; forecast points carry `forecast`, older ones "". */
+  mode: PlantAction | "forecast" | "";
   predicted_temp: number | null;
   window_open: boolean;
-  heating_power: number | null;
-  solar_irradiance: number | null;
+  /** Share of the sample the room was heating, missing on forecast points. */
+  heating_power?: number | null;
+  /** Solar irradiance at this sample, missing on forecast points. */
+  solar_irradiance?: number | null;
   blind_position?: number | null;
   cover_reason?: string;
   device_setpoint?: number | null;
@@ -352,6 +421,16 @@ export interface AnalyticsDataPoint {
   price_level?: string;
   /** Heat-side shift the electricity price applied (cool side moves the other way). */
   price_shift?: number | null;
+  /** Humidity-corrected room temperature from the Central HVAC roll-out. */
+  effective_temp?: number | null;
+  /** Room Priority weight used in the joint plant plan. */
+  priority_weight?: number | null;
+  /** Interior door open at this sample. */
+  door_open?: boolean;
+  /** The plant was circulating air at this sample. */
+  fan_circulating?: boolean;
+  /** House reference temperature from the joint whole-home model. */
+  house_temp?: number | null;
 }
 
 export interface RunOvershoot {
@@ -367,6 +446,9 @@ export interface AnalyticsStats {
   window_hours: number;
   heating_starts: number;
   cooling_starts: number;
+  /** House-wide circulation hours and starts (Central HVAC). */
+  circulating_hours?: number;
+  circulate_starts?: number;
   /** How far past the target the room went after the runs, null without runs. */
   heat_overshoot?: RunOvershoot | null;
   /** Run hours by price level, null without a price source. */
@@ -390,6 +472,8 @@ export interface RhythmDay {
   date: string;
   heat: Array<number | null>;
   cool: Array<number | null>;
+  /** Share of the hour the plant was circulating air, absent from older payloads. */
+  circulate?: Array<number | null>;
   window: Array<number | null>;
   deviation: Array<number | null>;
   /** Share of the judged time too cold / too warm, same tolerance as the period figures. */
@@ -454,10 +538,14 @@ export interface AnalyticsData {
     occupancy_learned?: boolean;
     solar_gain_now?: number;
     solar_gain_today_max?: number;
-    /** Radiator rooms: rise a regular run's stored heat gives after the stop (°C), its decay time */
-    afterglow_k?: number;
-    afterglow_minutes?: number;
-    afterglow_learned?: boolean;
+    /** Learned blower-to-room mixing rate and whether it is learned yet. */
+    fan_mix_rate?: number;
+    fan_mix_learned?: boolean;
+    /** Learned house-to-room coupling and whether it is learned yet. */
+    house_coupling?: number;
+    house_coupling_learned?: boolean;
+    /** 24 h occupancy probability curve (one value per hour, oldest first). */
+    occupancy_trend_24h?: number[];
     /** The model one hour ahead on this range (backend model_backtest), null without a model. */
     backtest?: ModelBacktest | null;
   };

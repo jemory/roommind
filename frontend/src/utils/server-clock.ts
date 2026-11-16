@@ -1,7 +1,7 @@
 /**
  * The server's clock, learned from every rooms/list answer. Countdowns compare server
- * timestamps (override end, compressor protection, coil dry) with it, so a device clock that
- * is off does not shift them. Card and panel bundles each keep their own copy.
+ * timestamps (override end, pre-heat start) with it, so a device clock that is off does not
+ * shift them. Card and panel bundles each keep their own copy.
  */
 let offsetMs = 0;
 

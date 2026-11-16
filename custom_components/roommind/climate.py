@@ -39,6 +39,7 @@ from .const import (
     DOMAIN,
     MAX_TARGET_TEMP,
     MIN_TARGET_TEMP,
+    MODE_CIRCULATING,
     MODE_COOLING,
     MODE_HEATING,
     OVERRIDE_BOOST,
@@ -47,11 +48,9 @@ from .const import (
     OVERRIDE_TURN_ON_REFRESH_DELAY_S,
     is_override_active,
 )
-from .control.mpc_controller import check_acs_can_heat
 from .coordinator import RoomMindCoordinator, _get_area_name
 from .deprecation import warn_deprecated_use
 from .utils.area_utils import rooms_with_area
-from .utils.device_utils import get_ac_eids, get_trv_eids
 from .utils.schedule_utils import (
     band_in_force,
     mask_override_band,
@@ -238,6 +237,22 @@ class RoomMindOverrideClimate(CoordinatorEntity, ClimateEntity):
         if mode == "cool_only":
             return HVACMode.COOL
         return HVACMode.HEAT
+
+    def _live(self) -> dict:
+        live: dict = ((self.coordinator.data or {}).get("rooms") or {}).get(self._area_id) or {}
+        return live
+
+    @property
+    def hvac_action(self) -> HVACAction | None:
+        """Mirror what the Central Plant is doing for this room."""
+        mode = self._live().get("mode")
+        if mode == MODE_HEATING:
+            return HVACAction.HEATING
+        if mode == MODE_COOLING:
+            return HVACAction.COOLING
+        if mode == MODE_CIRCULATING:
+            return HVACAction.FAN
+        return HVACAction.IDLE
 
     @property
     def native_target_temperature(self) -> float | None:
@@ -431,22 +446,15 @@ class RoomMindRoomClimate(CoordinatorEntity, ClimateEntity):
 
     @property
     def hvac_modes(self) -> list[HVACMode]:
-        room = self._room()
-        if room.get("is_outdoor", False):
+        """Every non-outdoor room is served by the Central Plant, on both sides.
+
+        The plant owns the hardware: furnace heating and heat-pump cooling are
+        available to each room through the shared Central Thermostat, so the
+        room no longer has to own a device that can do it.
+        """
+        if self._room().get("is_outdoor", False):
             return [HVACMode.OFF]
-        devices = room.get("devices", [])
-        can_cool = bool(get_ac_eids(devices))
-        can_heat = bool(get_trv_eids(devices)) or (can_cool and check_acs_can_heat(self.coordinator.hass, room))
-        current = _CLIMATE_MODE_TO_HVAC.get(self._climate_mode(), HVACMode.HEAT_COOL)
-        modes = [HVACMode.OFF]
-        for hvac, available in (
-            (HVACMode.HEAT, can_heat),
-            (HVACMode.COOL, can_cool),
-            (HVACMode.HEAT_COOL, can_heat and can_cool),
-        ):
-            if available or hvac == current:
-                modes.append(hvac)
-        return modes
+        return [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.HEAT_COOL]
 
     @property
     def hvac_mode(self) -> HVACMode:
@@ -471,6 +479,8 @@ class RoomMindRoomClimate(CoordinatorEntity, ClimateEntity):
             return HVACAction.HEATING
         if mode == MODE_COOLING:
             return HVACAction.COOLING
+        if mode == MODE_CIRCULATING:
+            return HVACAction.FAN
         return HVACAction.IDLE
 
     @property
@@ -542,7 +552,20 @@ class RoomMindRoomClimate(CoordinatorEntity, ClimateEntity):
             "vacation": vacation_until is not None and time.time() < vacation_until,
             # cheap / normal / expensive, None without a price source
             "price_level": live.get("price_level"),
+            # The room temperature the plant judges the room by: sensor reading, or the
+            # House Reference Temperature while an Interior Door isolates the room.
+            "effective_temperature": self._display_temperature(live.get("effective_temp")),
+            "priority_weight": live.get("priority_weight", 0.0),
+            "occupancy_probability": live.get("occupancy_probability", 0.0),
+            "interior_door_open": bool(live.get("interior_door_open", False)),
+            "exterior_window_open": bool(live.get("exterior_window_open", False)),
         }
+
+    def _display_temperature(self, value: Any) -> float | None:
+        """Convert a Celsius reading into the unit this installation displays."""
+        if not isinstance(value, (int, float)):
+            return None
+        return cast(float, display_temp(self.hass, float(value), UnitOfTemperature.CELSIUS, self.precision))
 
     async def _async_set_override(self, heat: float | None, cool: float | None, override_type: str) -> None:
         heat, cool = mask_override_band(heat, cool, self._climate_mode())

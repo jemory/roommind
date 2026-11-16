@@ -8,7 +8,13 @@ from math import ceil
 
 from homeassistant.util import dt as dt_util
 
-from ..const import CLIMATE_MODE_COOL_ONLY, CLIMATE_MODE_HEAT_ONLY, MODE_COOLING, MODE_HEATING
+from ..const import (
+    CLIMATE_MODE_COOL_ONLY,
+    CLIMATE_MODE_HEAT_ONLY,
+    MODE_CIRCULATING,
+    MODE_COOLING,
+    MODE_HEATING,
+)
 
 COMFORT_TOLERANCE_K = 0.5
 # A sample stands for the time until the next one; a gap (HA down) must not count as running time
@@ -178,10 +184,19 @@ def _run_overshoot(points: list[dict], mode: str, target_key: str, sign: int) ->
 
 
 def compute_period_stats(points: list[dict], climate_mode: str) -> dict:
-    """Sum up a time-sorted list of history points."""
-    seconds = {"total": 0.0, "heating": 0.0, "cooling": 0.0, "window": 0.0}
-    starts = {MODE_HEATING: 0, MODE_COOLING: 0}
-    start_keys = {MODE_HEATING: "heat_starts", MODE_COOLING: "cool_starts"}
+    """Sum up a time-sorted list of history points.
+
+    Circulation is its own figure: the central blower runs without firing the
+    furnace or heat pump, so its hours are neither heating nor cooling, and its
+    run starts are counted like theirs (``circulate_starts``).
+    """
+    seconds = {"total": 0.0, "heating": 0.0, "cooling": 0.0, "circulating": 0.0, "window": 0.0}
+    starts = {MODE_HEATING: 0, MODE_COOLING: 0, MODE_CIRCULATING: 0}
+    start_keys = {
+        MODE_HEATING: "heat_starts",
+        MODE_COOLING: "cool_starts",
+        MODE_CIRCULATING: "circulate_starts",
+    }
     comfort = {"below": 0.0, "within": 0.0, "above": 0.0}
     by_price: dict[str, dict[str, float]] = {MODE_HEATING: {}, MODE_COOLING: {}}
     priced = shifted = 0.0
@@ -223,9 +238,11 @@ def compute_period_stats(points: list[dict], climate_mode: str) -> dict:
         "hours": round(seconds["total"] / 3600, 2),
         "heating_hours": round(seconds[MODE_HEATING] / 3600, 2),
         "cooling_hours": round(seconds[MODE_COOLING] / 3600, 2),
+        "circulating_hours": round(seconds[MODE_CIRCULATING] / 3600, 2),
         "window_hours": round(seconds["window"] / 3600, 2),
         "heating_starts": starts[MODE_HEATING],
         "cooling_starts": starts[MODE_COOLING],
+        "circulate_starts": starts[MODE_CIRCULATING],
         # Run hours by price level and how long the price moved the target, None without a price
         "price": (
             {
@@ -276,17 +293,17 @@ def rhythm_window(start_ts: float, end_ts: float, now: float) -> tuple[int, floa
 
 
 def _empty_day(date_str: str) -> dict:
-    keys = ("heat", "cool", "window", "deviation", "below", "above", *RHYTHM_MEANS)
+    keys = ("heat", "cool", "circulate", "window", "deviation", "below", "above", *RHYTHM_MEANS)
     return {"date": date_str, **{key: [None] * 24 for key in keys}, "within": None}
 
 
 def compute_rhythm(points: list[dict], climate_mode: str, end_ts: float, days_shown: int = RHYTHM_DAYS) -> dict | None:
     """Hour-by-day grid of the local days up to end_ts, newest day first.
 
-    heat, cool and window are shares of the hour (0-1), below and above the shares of the
-    judged time too cold / too warm with the same tolerance as the period figures,
-    deviation is the mean signed distance from the wanted band in K, temp, humidity and
-    outdoor are hourly means; within is the day's judged share on target.
+    heat, cool, circulate and window are shares of the hour (0-1), below and above the
+    shares of the judged time too cold / too warm with the same tolerance as the period
+    figures, deviation is the mean signed distance from the wanted band in K, temp,
+    humidity and outdoor are hourly means; within is the day's judged share on target.
     An hour without samples is None. None overall while fewer than RHYTHM_MIN_DAYS days
     have data, a single row says nothing.
     """
@@ -306,6 +323,7 @@ def compute_rhythm(points: list[dict], climate_mode: str, end_ts: float, days_sh
         for key, on in (
             ("heat", point.get("mode") == MODE_HEATING),
             ("cool", point.get("mode") == MODE_COOLING),
+            ("circulate", point.get("mode") == MODE_CIRCULATING),
             ("window", bool(point.get("window_open"))),
         ):
             cell[key] = cell.get(key, 0.0) + (weight if on else 0.0)
@@ -321,7 +339,7 @@ def compute_rhythm(points: list[dict], climate_mode: str, end_ts: float, days_sh
 
     for (row, hour), cell in cells.items():
         day = days[row]
-        for key in ("heat", "cool", "window"):
+        for key in ("heat", "cool", "circulate", "window"):
             day[key][hour] = round(cell[key] / cell["seconds"], 2)
         for key in ("deviation", *RHYTHM_MEANS):
             if f"{key}_seconds" in cell:

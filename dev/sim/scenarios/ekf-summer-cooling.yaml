@@ -1,0 +1,29 @@
+name: ekf-summer-cooling
+extends: covers-solar-south
+description: >
+  Same south room on the Central Plant over ten summer days. While the heat pump cools,
+  the supply air pulls the room air below the building mass within minutes; after the run
+  the air rebounds towards the mass. A one-node model booked that rebound as loss to the
+  33 °C outdoors and part of it as solar gain. The EKF carries the air/mass offset as a
+  lagged charge with its own gain (beta_f) and learns the blower mixing as beta_fan, so
+  alpha, beta_c and beta_s describe the whole room. Covers stay off: shading would change
+  the solar input the EKF sees.
+refs: [35]
+tags: [central-plant, model, solar, cooling]
+duration: 10d
+house:
+  rooms:
+    living_room:
+      initial: {temperature: 25.0, mass_temperature: 25.0}
+roommind:
+  rooms:
+    living_room: {covers_auto_enabled: false}
+timeline: []
+expect:
+  - {invariant: no_rejected_commands}
+  - {invariant: setpoints_within_device_range}
+  # A strong cooling plant must not be booked as a large solar gain.
+  - {metric: model.learned_beta_s, room: living_room, max: 3.0, label: solar gain stays near the truth with a strong plant}
+  # 0.005-0.015 is the whole room; a one-node model booked the rebound as 0.5-1.6 1/h.
+  - {metric: model.learned_alpha_per_h, room: living_room, min: 0.005, max: 0.05, label: loss rate of the whole room, not of the air node}
+  - {metric: comfort.overshoot_kh, room: living_room, max: 9, label: cooling keeps the room near its target}

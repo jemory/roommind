@@ -10,11 +10,12 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from homeassistant.core import CoreState
 
 from custom_components.roommind.const import DEFAULT_COMFORT_COOL, DEFAULT_ECO_COOL, TargetTemps
 from custom_components.roommind.utils.schedule_utils import cap_cool_only_heat, make_target_resolver
 
-from .coordinator.conftest import SAMPLE_ROOM, _create_coordinator, _make_store_mock, make_mock_states_get
+from .coordinator.conftest import DEFAULT_THERMOSTAT_ATTRIBUTES, THERMOSTAT_ENTITY, FakeStates, Harness, make_room
 
 
 @pytest.mark.parametrize(
@@ -89,24 +90,47 @@ def test_resolver_series_never_inverts_a_cool_only_band():
     assert make_target_resolver(None, auto, {})(0.0) == TargetTemps(heat=24.5, cool=24.0)
 
 
+@pytest.fixture
+def central_hass(hass):
+    """A mocked Home Assistant that can run a full Central Plant cycle.
+
+    Mirrors the ``plant_hass`` fixture of ``tests/coordinator/conftest.py``; that
+    conftest's fixtures only apply inside its directory, so the cool_only case
+    lives here with its own wiring.
+    """
+    states = FakeStates()
+    hass.states = states
+    hass.services = MagicMock()
+    hass.services.async_call = AsyncMock(return_value={})
+    hass.bus = MagicMock()
+    hass.state = CoreState.running
+    hass.config.units = MagicMock()
+    hass.config.units.temperature_unit = "°C"
+    hass.config.latitude = 52.0
+    hass.config.longitude = 13.0
+    hass.config.time_zone = "UTC"
+    hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+    states.set("sensor.outdoor_temp", "5.0", {"unit_of_measurement": "°C"})
+    states.set("sensor.room_temp", "25.0", {"unit_of_measurement": "°C"})
+    states.set("sensor.room_humidity", "55.0")
+    states.set(THERMOSTAT_ENTITY, "cool", dict(DEFAULT_THERMOSTAT_ATTRIBUTES))
+    return hass
+
+
 @pytest.mark.asyncio
-async def test_coordinator_resolves_a_consistent_cool_only_band(hass, mock_config_entry):
-    room = {
-        **SAMPLE_ROOM,
-        "climate_mode": "cool_only",
-        "thermostats": [],
-        "acs": ["climate.living_room"],
-        "devices": [{"entity_id": "climate.living_room", "type": "ac", "role": "auto", "heating_system_type": ""}],
-        "schedules": [],
-        "comfort_heat": 24.5,
-        "comfort_temp": 24.5,
-        "comfort_cool": 24.0,
-    }
-    store = _make_store_mock({"living_room_abc12345": room})
-    hass.data = {"roommind": {"store": store}}
-    hass.states.get = MagicMock(side_effect=make_mock_states_get(temp="25.0"))
-    hass.services.async_call = AsyncMock()
-    coordinator = _create_coordinator(hass, mock_config_entry)
-    data = await coordinator._async_update_data()
-    state = data["rooms"]["living_room_abc12345"]
+async def test_coordinator_resolves_a_consistent_cool_only_band(central_hass):
+    """A cool_only room keeps one band: no lifted cool side next to the default heat side."""
+    harness = Harness(central_hass)
+    await harness.seed(
+        rooms={
+            "buero": make_room(
+                climate_mode="cool_only",
+                comfort_heat=24.5,
+                comfort_temp=24.5,
+                comfort_cool=24.0,
+            )
+        }
+    )
+    data = await harness.cycle()
+    state = data["rooms"]["buero"]
     assert (state["heat_target"], state["cool_target"], state["target_temp"]) == (24.0, 24.0, 24.0)

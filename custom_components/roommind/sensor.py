@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
@@ -13,6 +13,17 @@ from .const import DOMAIN
 from .coordinator import RoomMindCoordinator
 from .utils.area_utils import rooms_with_area
 
+# The Central Plant publishes one shared state block per coordinator cycle
+CENTRAL_ACTION_ENTITY_ID = "sensor.roommind_central_action"
+HOUSE_TEMPERATURE_ENTITY_ID = "sensor.roommind_house_temperature"
+
+
+def _central_plant_data(coordinator: RoomMindCoordinator) -> dict:
+    """Return the live Central Plant block, or an empty dict before the first cycle."""
+    data = coordinator.data or {}
+    plant = data.get("central_plant") if isinstance(data, dict) else None
+    return plant if isinstance(plant, dict) else {}
+
 
 def _create_room_entities(coordinator: RoomMindCoordinator, area_id: str) -> list[SensorEntity]:
     """Create the standard set of sensor entities for a room."""
@@ -20,6 +31,11 @@ def _create_room_entities(coordinator: RoomMindCoordinator, area_id: str) -> lis
         RoomMindTargetTemperatureSensor(coordinator, area_id),
         RoomMindModeSensor(coordinator, area_id),
     ]
+
+
+def _create_global_entities(coordinator: RoomMindCoordinator) -> list[SensorEntity]:
+    """Create the whole-home Central Plant sensors (enabled by default)."""
+    return [RoomMindCentralActionSensor(coordinator), RoomMindHouseTemperatureSensor(coordinator)]
 
 
 async def async_setup_entry(
@@ -34,14 +50,15 @@ async def async_setup_entry(
     # Store the callback on the coordinator so dynamic entity creation works
     coordinator.async_add_entities = async_add_entities
 
+    # The Central Plant sensors exist once per installation, independent of any room
+    entities: list[SensorEntity] = _create_global_entities(coordinator)
+
     # Create entities for rooms that already exist in the store
     rooms = rooms_with_area(hass, store.get_rooms())
-    entities: list[SensorEntity] = []
     for area_id in rooms:
         entities.extend(_create_room_entities(coordinator, area_id))
         coordinator._entity_areas.add(area_id)
-    if entities:
-        async_add_entities(entities)
+    async_add_entities(entities)
 
 
 class _RoomMindBaseSensor(CoordinatorEntity, SensorEntity):
@@ -79,6 +96,8 @@ class _RoomMindBaseSensor(CoordinatorEntity, SensorEntity):
 class RoomMindTargetTemperatureSensor(_RoomMindBaseSensor):
     """Sensor showing the target temperature for a RoomMind room."""
 
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
     _data_key = "target_temp"
 
@@ -102,3 +121,67 @@ class RoomMindModeSensor(_RoomMindBaseSensor):
             val = room.get("mode", "idle")
             return str(val) if val is not None else "idle"
         return "idle"
+
+
+class RoomMindCentralActionSensor(CoordinatorEntity, SensorEntity):
+    """The plant action the whole-home optimizer is executing (idle/heating/cooling/circulating)."""
+
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = True
+    _attr_icon = "mdi:hvac"
+    _attr_translation_key = "central_action"
+
+    def __init__(self, coordinator: RoomMindCoordinator) -> None:
+        """Initialize the Central HVAC Action sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_central_action"
+        self.entity_id = CENTRAL_ACTION_ENTITY_ID
+
+    @property
+    def native_value(self) -> str:
+        """Return the plant's current action, defaulting to idle."""
+        value = _central_plant_data(self.coordinator).get("action", "idle")
+        return str(value) if value is not None else "idle"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Expose the decision behind the action for the panel and automations."""
+        plant = _central_plant_data(self.coordinator)
+        return {
+            # The controller publishes the commanded action as "action"; older shapes differ
+            "commanded_action": plant.get("commanded_action", plant.get("action")),
+            "driving_rooms": plant.get("driving_rooms", []),
+            "decision_reason": plant.get("decision_reason"),
+            "guard_active": bool(plant.get("guard_active", False)),
+            "guard_reason": plant.get("guard_reason"),
+            "wet_coil_locked": bool(plant.get("wet_coil_locked", False)),
+            "exterior_paused_rooms": plant.get("exterior_paused_rooms", plant.get("blocking_rooms", [])),
+            "plant_override_active": bool(plant.get("plant_override_active", plant.get("any_override", False))),
+        }
+
+
+class RoomMindHouseTemperatureSensor(CoordinatorEntity, SensorEntity):
+    """The House Reference Temperature the Central Plant compares the rooms against.
+
+    ``SensorDeviceClass.TEMPERATURE`` with a Celsius native unit makes Home
+    Assistant convert the value into the installation's configured display unit.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = True
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_translation_key = "house_temperature"
+
+    def __init__(self, coordinator: RoomMindCoordinator) -> None:
+        """Initialize the House Reference Temperature sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_house_temperature"
+        self.entity_id = HOUSE_TEMPERATURE_ENTITY_ID
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the House Reference Temperature, or None while it is unknown."""
+        value = _central_plant_data(self.coordinator).get("house_ref_temp")
+        return float(value) if isinstance(value, (int, float)) else None

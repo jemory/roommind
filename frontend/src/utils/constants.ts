@@ -26,7 +26,22 @@ export function preheatLeadHours(comfortWeight: number): number {
   return (Math.floor((hours * 60) / 5) * 5) / 60;
 }
 
-/** MPC data gate; mirror MIN_IDLE_UPDATES, MIN_ACTIVE_UPDATES and MPC_MAX_PREDICTION_STD (mpc_controller). */
-export const MPC_MIN_IDLE_SAMPLES = 60;
-export const MPC_MIN_ACTIVE_SAMPLES = 20;
+/**
+ * MPC data gate; mirrors MIN_IDLE_UPDATES, MIN_ACTIVE_UPDATES and MPC_MAX_PREDICTION_STD
+ * (central_mpc.py).
+ */
+export const MPC_MIN_IDLE_SAMPLES = 40;
+export const MPC_MIN_ACTIVE_SAMPLES = 12;
 export const MPC_MAX_PREDICTION_STD = 0.5;
+
+/** Interior-door delay until a changed door state counts; mirrors DEFAULT_INTERIOR_DOOR_DELAY_S. */
+export const DEFAULT_INTERIOR_DOOR_DELAY = 60;
+/** Coupling scaling of a closed interior door; mirrors DEFAULT_DOOR_CLOSED_MIX_FACTOR. */
+export const DEFAULT_DOOR_CLOSED_MIX_FACTOR = 0.4;
+/** Minutes of sustained occupancy before a room counts as occupied. */
+export const DEFAULT_OCCUPANCY_DWELL_MINUTES = 3;
+/** Bounds of the occupancy dwell and interior-door delay fields. */
+export const MIN_OCCUPANCY_DWELL_MINUTES = 0;
+export const MAX_OCCUPANCY_DWELL_MINUTES = 60;
+export const MIN_INTERIOR_DOOR_DELAY = 0;
+export const MAX_INTERIOR_DOOR_DELAY = 3600;

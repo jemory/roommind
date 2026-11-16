@@ -2,6 +2,7 @@ description: Ecobee controlling a central heat pump in °F with heat_cool range 
 model: heat_pump
 capabilities:
   hvac_modes: ["off", "heat", "cool", "heat_cool"]
+  fan_modes: ["auto", "on"]     # the air handler can run on its own (circulation)
   min_temp: 45
   max_temp: 92
   target_temp_step: 1
@@ -19,5 +20,9 @@ params:
   defrost_interval_s: 2700     # air-source outdoor coil; 0 for a furnace
   defrost_s: 300
   defrost_action: heating
+  circulation_ach: 2.5         # blower recirculation over the served rooms while conditioning
+  fan_circulation_ach: 1.8     # the same with neither burner nor compressor (fan / fan_only)
+  door_closed_return_factor: 0.35   # return-plenum share of a room behind a shut interior door
+  door_closed_supply_factor: 0.75   # its duct supply share
 quirks:
   - {type: rounding, whole_degrees: true}

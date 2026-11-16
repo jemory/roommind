@@ -2,20 +2,26 @@
 
 For every recorded point the model starts from the reading one hour earlier and runs forward
 with what really happened in between (delivered heating/cooling share, outdoor temperature,
-sun behind the covers, residual heat, occupancy, open windows): the inputs the model learned
-from, recorded per row since 2.0 (``model_*`` columns). The difference to the reading at the
-end is the model's error over that hour.
+sun behind the covers, occupancy, the rest-of-house node, the blower, the interior-door
+coupling, open windows): the inputs the model learned from, recorded per row since 2.0
+(``model_*`` columns). The difference to the reading at the end is the model's error over
+that hour.
 
-It is today's model applied to the past, not a forecast made back then: over long ranges it
-mixes seasons and changes to the room. Rows from before the columns have no inputs and are
-left out instead of guessing the delivered power (the history only has the commanded one).
+The replay tracks the same signed forced-air charge the EKF trains with: the air/mass offset
+of a furnace or heat pump run (``+`` heating, ``-`` cooling) relaxes after the unit stops, and
+a blower circulating the air mixes the room with the house without conditioning it. Only the
+charge along the *recorded* sequence is reconstructed — the model is today's model applied to
+the past, not a forecast made back then: over long ranges it mixes seasons and changes to the
+room. Rows from before the columns have no inputs and are left out instead of guessing the
+delivered power (the history only has the commanded one).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..control.residual_heat import advance_rebound, mean_rebound
+from ..const import MODE_CIRCULATING, MODE_COOLING, MODE_HEATING, MODE_IDLE
+from ..control.rebound import advance_rebound, drive_for_mode, mean_rebound
 from ..control.thermal_model import RCModel
 
 BACKTEST_HORIZON_S = 3600.0
@@ -66,12 +72,35 @@ def _inputs_known(p: dict) -> bool:
     return p.get("room_temp") is not None and p.get("outdoor_temp") is not None and p.get("model_power") is not None
 
 
+def _drive_of(share: float | None) -> float:
+    """Signed forced-air drive of a recorded delivered-power *share* (+ heating, - cooling)."""
+    if share is None:
+        return 0.0
+    if share > 0:
+        return 1.0
+    return -1.0 if share < 0 else 0.0
+
+
+def _step_mode(share: float, u_fan: float) -> str:
+    """Mode a recorded step ran in: its delivered power first, the blower only without it."""
+    if share > 0:
+        return MODE_HEATING
+    if share < 0:
+        return MODE_COOLING
+    return MODE_CIRCULATING if u_fan > 0.0 else MODE_IDLE
+
+
+def _factor(value: object) -> float:
+    """A recorded coupling factor, 1.0 when the row has none (open door, undamped supply)."""
+    return float(value) if isinstance(value, (int, float)) else 1.0
+
+
 def backtest(points: list[dict], model: RCModel, k_window: float) -> BacktestResult:
     """Run the one-hour backtest over *points* (sorted by ``ts``, typed like _csv_to_points).
 
     ``predicted`` maps the end timestamp of each hour to the model's temperature; hours with an
     open window are drawn but not counted (the window model is the roughest part). An hour
-    counts as active when the model saw heating or cooling in it.
+    counts as active when the model saw heating, cooling or the blower running in it.
     """
     result = BacktestResult()
     n = len(points)
@@ -86,10 +115,11 @@ def backtest(points: list[dict], model: RCModel, k_window: float) -> BacktestRes
         bad = not known[k - 1] or ts[k] - ts[k - 1] > MAX_STEP_S or ts[k] <= ts[k - 1]
         breaks[k] = breaks[k - 1] + int(bad)
 
-    # AC rebound charge along the recorded sequence (the EKF's charge follows its own labels)
+    # Signed air/mass charge along the recorded sequence, from the delivered power the row
+    # before each step recorded (the EKF's charge follows its own labels)
     charge = [0.0] * n
     for k in range(1, n):
-        drive = 1.0 if known[k - 1] and points[k - 1]["model_power"] < 0 else 0.0
+        drive = _drive_of(points[k - 1].get("model_power"))
         charge[k] = advance_rebound(charge[k - 1], drive, max(0.0, ts[k] - ts[k - 1]) / 60.0)
 
     j = 0
@@ -113,23 +143,25 @@ def backtest(points: list[dict], model: RCModel, k_window: float) -> BacktestRes
                 window = True
                 T = model.predict_window_open(T, p["outdoor_temp"], k_window, dt)
                 continue
-            share = p["model_power"]
-            if share > 0:
-                Q = share * model.Q_heat
-            elif share < 0:
-                Q = share * model.Q_cool
-            else:
-                Q = 0.0
-            active = active or Q != 0.0
+            share: float = p.get("model_power") or 0.0
+            u_fan = p.get("model_fan") or 0.0
+            mode = _step_mode(share, u_fan)
+            # share < 0 already carries the sign, so Q < 0 while cooling
+            Q = share * model.Q_heat if share > 0 else (share * model.Q_cool if share < 0 else 0.0)
+            active = active or Q != 0.0 or u_fan > 0.0
             T = model.predict(
                 T,
                 p["outdoor_temp"],
                 Q,
                 dt,
+                T_house=p.get("model_house_temp"),
+                u_fan=u_fan,
+                door_mix_factor=_factor(p.get("model_door_mix")),
+                door_supply_factor=_factor(p.get("model_door_supply")),
                 q_solar=p.get("model_solar") or 0.0,
-                q_residual=p.get("model_residual") or 0.0,
                 q_occupancy=p.get("model_occupancy") or 0.0,
-                q_rebound=mean_rebound(charge[k], RCModel.cooling_drive(Q), dt),
+                q_rebound=mean_rebound(charge[k], drive_for_mode(mode), dt),
+                mode=mode,
             )
         result.predicted[ts[i]] = round(T, 2)
         if not window:

@@ -1,0 +1,57 @@
+name: price-shift-cooling
+description: >
+  Dynamic electricity tariff (Nordpool-style template sensor with raw_today/raw_tomorrow,
+  cheap at midday, expensive in the evening), house run by one Central Plant whose cooling is
+  a heat pump. The cooled living_room opted into a 1.5 K price shift, and the Central Plant
+  shifts the cooling side by default (price_shift_modes cool_only): it pre-cools while power
+  is cheap before an expensive stretch and coasts while it is expensive. The office without
+  the option stays unchanged. Compare against the same run with
+  --set roommind.rooms.living_room.price_shift=0.
+refs: [257]
+tags: [price, central-plant]
+extends: covers-solar-south
+start: 2026-07-06T00:00
+duration: 4d
+timeline: []
+helpers:
+  template:
+    - sensor:
+        - name: Electricity price
+          unique_id: sim_electricity_price
+          unit_of_measurement: ct/kWh
+          state: >-
+            {% set p = [26,25,24,23,22,21,20,22,26,30,28,24,18,16,15,16,22,30,36,38,34,30,28,27] %}
+            {{ p[now().hour] }}
+          attributes:
+            raw_today: >-
+              {% set p = [26,25,24,23,22,21,20,22,26,30,28,24,18,16,15,16,22,30,36,38,34,30,28,27] %}
+              {% set ns = namespace(out=[]) %}
+              {% for h in range(24) %}{% set s = today_at('00:00') + timedelta(hours=h) %}
+              {% set ns.out = ns.out + [{'start': s.isoformat(), 'end': (s + timedelta(hours=1)).isoformat(), 'value': p[h]}] %}
+              {% endfor %}{{ ns.out }}
+            raw_tomorrow: >-
+              {% set p = [26,25,24,23,22,21,20,22,26,30,28,24,18,16,15,16,22,30,36,38,34,30,28,27] %}
+              {% set ns = namespace(out=[]) %}
+              {% for h in range(24) %}{% set s = today_at('00:00') + timedelta(days=1, hours=h) %}
+              {% set ns.out = ns.out + [{'start': s.isoformat(), 'end': (s + timedelta(hours=1)).isoformat(), 'value': p[h]}] %}
+              {% endfor %}{{ ns.out }}
+roommind:
+  settings:
+    price_entity: sensor.electricity_price
+    central_plant:
+      price_shift_modes: cool_only
+  rooms:
+    living_room:
+      price_shift: 1.5
+      # Shading would change the solar load the price comparison sees.
+      covers_auto_enabled: false
+expect:
+  - {invariant: target_never_empty}
+  - {invariant: no_rejected_commands}
+  - {invariant: setpoints_within_device_range}
+  - {check: "room.living_room.price_level == 'expensive' and room.living_room.cool_target == 26.0", at: "+1d18h30m", label: coasts while expensive}
+  - {check: "room.living_room.price_shift_cool > 0", at: "+1d18h30m", label: the shift is reported for the analytics chart}
+  - {check: "room.living_room.price_level == 'cheap' and room.living_room.cool_target == 23.0", at: "+1d13h30m", label: pre-cools before the expensive evening}
+  - {check: "room.office.price_shift_cool == 0 and room.office.cool_target == 24.5", at: "+1d18h30m", label: rooms without the option are untouched}
+  - {metric: room.price_shift_h, room: living_room, min: 8, label: the price moved the cooling target}
+  - {metric: comfort.in_band_pct, room: living_room, min: 75, label: the shifted band is still liveable}

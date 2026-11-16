@@ -36,6 +36,15 @@
               "none": "Schedule",
               "manual": "Manual"
             }
+          },
+          "hvac_action": {
+            "state": {
+              "off": "Off",
+              "idle": "Idle",
+              "heating": "Heating",
+              "cooling": "Cooling",
+              "fan": "Circulating"
+            }
           }
         }
       }
@@ -43,6 +52,21 @@
     "binary_sensor": {
       "air_quality": {
         "name": "{room} air quality poor"
+      },
+      "wet_coil_lockout": {
+        "name": "Wet Coil Circulation Lockout",
+        "state": {
+          "on": "Locked",
+          "off": "Clear"
+        }
+      }
+    },
+    "sensor": {
+      "central_action": {
+        "name": "Central HVAC Action"
+      },
+      "house_temperature": {
+        "name": "House Reference Temperature"
       }
     }
   }

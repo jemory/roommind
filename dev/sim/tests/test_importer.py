@@ -129,5 +129,13 @@ def test_replay_needs_history_and_writes_csvs(tmp_path):
 
 def test_ws_keys_come_from_roommind_schema():
     keys = ws_keys("roommind/rooms/save")
-    assert {"devices", "temperature_sensor", "climate_mode"} <= keys
+    assert {
+        "temperature_sensor",
+        "climate_mode",
+        "exterior_window_sensors",
+        "interior_door_sensors",
+        "occupancy_mode",
+        "read_only_covers",
+    } <= keys
+    assert "devices" not in keys
     assert "override_until" not in keys

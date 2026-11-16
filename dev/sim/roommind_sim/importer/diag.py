@@ -260,6 +260,36 @@ class _Importer:
             "ach_infiltration": round(preset["ach_infiltration"] * factor, 3),
         }
 
+    def central_thermostat(self, settings: dict[str, Any], rooms: dict[str, Any]) -> None:
+        """Simulate the central plant's thermostat when the rooms list no device themselves.
+
+        Under ``central_plant`` one thermostat runs the whole house and a room's config may
+        carry no device at all; without this the import would control a house with nothing
+        to switch. The thermostat is simulated in its own area, with the profile its name
+        and state imply.
+        """
+        plant = settings.get("central_plant") or {}
+        if not isinstance(plant, dict):
+            return
+        eid = plant.get("thermostat_entity")
+        if not eid or eid in self.defined:
+            return
+        area = plant.get("thermostat_area_id") or next(iter(rooms), "")
+        if area not in rooms:
+            self.external.add(eid)
+            self.note(f"{eid}: central plant thermostat has no simulated area, left out")
+            return
+        if any(d.get("entity_id") == eid for d in rooms[area].get("devices") or []):
+            self.defined.add(eid)
+            return
+        diag = self.d["rooms"].get(area) or {}
+        states = {s["entity_id"]: s for s in diag.get("device_states") or []}
+        cfg = diag.get("config") or {}
+        rooms[area].setdefault("devices", []).append(
+            self.device(area, {"entity_id": eid, "type": "ac"}, states.get(eid, {}), cfg)
+        )
+        self.note(f"{eid}: simulated as the central plant's thermostat (central_plant settings)")
+
     def schedule(self, eid: str, diag: dict[str, Any], helpers: dict[str, Any]) -> None:
         if not eid or eid in self.defined:
             return
@@ -338,6 +368,7 @@ class _Importer:
         rows = self.history_rows(csvs)
         helpers: dict[str, Any] = {}
         rooms = {area: self.room(area, diag, rows.get(area, []), helpers) for area, diag in d["rooms"].items()}
+        self.central_thermostat(settings, rooms)
         people = self.people(settings, d["rooms"], helpers)
         outdoor_sensors = {}
         if settings.get("outdoor_temp_sensor"):
@@ -521,6 +552,9 @@ def _referenced(rooms: dict[str, Any], settings: dict[str, Any]) -> set[str]:
     for key in ("outdoor_temp_sensor", "outdoor_humidity_sensor"):
         if settings.get(key):
             out.add(settings[key])
+    plant = settings.get("central_plant") or {}
+    if isinstance(plant, dict) and plant.get("thermostat_entity"):
+        out.add(plant["thermostat_entity"])
     out |= set(settings.get("presence_persons") or [])
     for group in settings.get("compressor_groups") or []:
         out |= set(group.get("members") or [])

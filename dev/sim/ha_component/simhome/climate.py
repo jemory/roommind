@@ -33,6 +33,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add: AddEnt
 
 
 class SimClimate(SimEntity, ClimateEntity):
+    """One simulated climate device.
+
+    Fan modes are optional and fully wired: when the device declares
+    ``capabilities.fan_modes`` (or, for a forced-air plant, defaults to ``auto``/``on``)
+    the entity advertises ``ClimateEntityFeature.FAN_MODE``, shows ``fan_mode`` and
+    ``fan_modes``, and ``async_set_fan_mode`` routes ``set_fan_mode`` to the device, where
+    ``on`` alone starts the central blower (circulation) without the burner or compressor.
+    """
+
     def __init__(self, rt: Any, dev: SimDevice) -> None:
         super().__init__(rt, dev.entity_id, dev.spec.name)
         self.dev = dev
@@ -46,6 +55,7 @@ class SimClimate(SimEntity, ClimateEntity):
         if dev.fan_modes:
             features |= ClimateEntityFeature.FAN_MODE
             self._attr_fan_modes = dev.fan_modes
+            self._attr_fan_mode = dev.fan_mode  # "auto" unless the device starts elsewhere
         if "off" in dev.hvac_modes:
             features |= ClimateEntityFeature.TURN_OFF | ClimateEntityFeature.TURN_ON
         self._attr_supported_features = features

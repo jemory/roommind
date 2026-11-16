@@ -65,6 +65,7 @@ async def test_room_config_has_cover_defaults():
 
     room = store._data["test_area"]
     assert room["covers"] == []
+    assert room["read_only_covers"] == []
     assert room["covers_auto_enabled"] is False
     assert room["covers_deploy_threshold"] == 1.5
     assert room["covers_min_position"] == 0
@@ -558,6 +559,57 @@ async def test_async_apply_supported_features_none():
         {"entity_id": ["cover.weird"]},
         blocking=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_async_apply_skips_a_sensor_read_only_cover():
+    """A sensor that reports a blind position is a reading: it never gets a cover service call."""
+    hass = MagicMock()
+    hass.services.async_call = AsyncMock()
+
+    cover_state = MagicMock()
+    cover_state.attributes = {"supported_features": 4, "current_position": 100}
+    hass.states.get = MagicMock(return_value=cover_state)
+
+    await CoverManager.async_apply(hass, ["sensor.blind_position", "cover.blind1"], 60)
+
+    hass.services.async_call.assert_called_once_with(
+        "cover",
+        "set_cover_position",
+        {"entity_id": ["cover.blind1"], "position": 60},
+        blocking=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_apply_with_only_read_only_covers_makes_no_call():
+    """A room with only read-only covers can never be commanded."""
+    hass = MagicMock()
+    hass.services.async_call = AsyncMock()
+    hass.states.get = MagicMock(return_value=MagicMock(attributes={"supported_features": 0}))
+
+    await CoverManager.async_apply(hass, ["sensor.blind_position"], 0)
+
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_async_apply_read_only_covers_keep_the_group_minimum():
+    """Skipping non-cover entities does not disturb the per-cover minimum grouping."""
+    hass = MagicMock()
+    hass.services.async_call = AsyncMock()
+    hass.states.get = MagicMock(return_value=MagicMock(attributes={"supported_features": 4}))
+
+    await CoverManager.async_apply(
+        hass,
+        ["cover.a", "sensor.reading", "cover.b"],
+        30,
+        cover_min_positions={"cover.a": 20, "cover.b": 50},
+    )
+
+    assert hass.services.async_call.call_count == 2
+    called = {call.args[2]["position"]: call.args[2]["entity_id"] for call in hass.services.async_call.call_args_list}
+    assert called == {30: ["cover.a"], 50: ["cover.b"]}
 
 
 # ── MPC-Cover feedback convergence ────────────────────────────────────

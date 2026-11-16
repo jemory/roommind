@@ -1,11 +1,11 @@
 name: restart-mid-run
 extends: restart-resume
 description: >
-  Restarts and integration reloads every few hours, so several land in the middle of
-  a heating run. The previous mode lives in memory only; a run inside the start
-  hysteresis band (20.9 at 21) used to be switched off once after every restart.
+  Restarts and integration reloads every few hours, so several land in the middle of a
+  heating run on the Central Plant. The previous mode lives in memory only; a run inside the
+  start hysteresis band used to be switched off once after every restart.
 refs: [437]
-tags: [infra, trv]
+tags: [infra, central-plant]
 duration: 2d
 timeline:
   - {at: "+0d04h07m", do: ha.restart}

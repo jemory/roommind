@@ -7,11 +7,23 @@ import logging
 import os
 import time
 
-from ..const import MODE_COOLING, MODE_HEATING
+from ..const import MODE_CIRCULATING, MODE_COOLING, MODE_HEATING
 
 _LOGGER = logging.getLogger(__name__)
 
-MODEL_INPUT_FIELDS = ("model_power", "model_solar", "model_residual", "model_occupancy")
+# Everything the model learned from, recorded per row since 2.0 and replayed by
+# the analytics backtest: signed delivered power share (+ heating, - cooling),
+# sun behind the covers, occupancy, the rest-of-house node, the blower and the
+# interior-door coupling factors.
+MODEL_INPUT_FIELDS = (
+    "model_power",
+    "model_solar",
+    "model_occupancy",
+    "model_house_temp",
+    "model_fan",
+    "model_door_mix",
+    "model_door_supply",
+)
 
 DETAIL_FIELDS = [
     "timestamp",
@@ -39,16 +51,28 @@ DETAIL_FIELDS = [
     # mode, its transitions lose the short runs
     "heat_starts",
     "cool_starts",
+    "circulate_starts",
     # Extremes of a history bucket: a short run peaks inside it, the bucket mean hides the peak
     "room_temp_max",
     "room_temp_min",
     # Room air CO2 in ppm (#267)
     "co2",
-    # What the model learned from (analytics backtest): signed delivered power share
-    # (+ heating, - cooling), sun behind the covers, residual heat share, occupancy
+    # Central HVAC adaptation: the resolved per-room control variables behind
+    # the mode (shared-band target the room was driven to, its Plant Priority
+    # weight) and the two binary inputs the thermal model integrates
+    "effective_temp",
+    "priority_weight",
+    "door_open",
+    "fan_circulating",
+    # What the model learned from (analytics backtest), see MODEL_INPUT_FIELDS
     *MODEL_INPUT_FIELDS,
 ]
-START_FIELDS = {MODE_HEATING: "heat_starts", MODE_COOLING: "cool_starts"}
+START_FIELDS = {
+    MODE_HEATING: "heat_starts",
+    MODE_COOLING: "cool_starts",
+    MODE_CIRCULATING: "circulate_starts",
+}
+
 DETAIL_MAX_AGE = 48 * 3600  # 48 hours
 HISTORY_MAX_AGE = 90 * 24 * 3600  # 90 days
 
@@ -139,6 +163,10 @@ class HistoryStore:
                     "price_level": data.get("price_level", ""),
                     "price_shift": data.get("price_shift", ""),
                     "co2": data.get("co2", ""),
+                    "effective_temp": data.get("effective_temp", ""),
+                    "priority_weight": data.get("priority_weight", ""),
+                    "door_open": data.get("door_open", ""),
+                    "fan_circulating": data.get("fan_circulating", ""),
                     **{field: data.get(field, "") for field in MODEL_INPUT_FIELDS},
                     **{key: int(mode == run and previous != run) for run, key in START_FIELDS.items()},
                 }
@@ -267,6 +295,10 @@ class HistoryStore:
                 "device_setpoint": bucket[0].get("device_setpoint", ""),
                 "target_reason": bucket[0].get("target_reason", ""),
                 "price_level": bucket[0].get("price_level", ""),
+                # Binary state columns keep the state the bucket starts in, like window_open:
+                # a share would make the column ambiguous for the analytics page
+                "door_open": bucket[0].get("door_open", ""),
+                "fan_circulating": bucket[0].get("fan_circulating", ""),
             }
             for field in (
                 "room_temp",
@@ -283,6 +315,8 @@ class HistoryStore:
                 "price",
                 "price_shift",
                 "co2",
+                "effective_temp",
+                "priority_weight",
                 *MODEL_INPUT_FIELDS,
             ):
                 vals = [v for r in bucket if (v := self._float(r.get(field, ""))) is not None]

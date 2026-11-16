@@ -735,28 +735,173 @@ def test_rotate_keeps_the_starts_in_an_old_history_file(history_dir):
 
 def test_record_and_downsample_keep_the_model_inputs(history_dir):
     store = HistoryStore(history_dir)
-    for i, power in enumerate([1.0, 0.5, 0.0]):
+    # The forced-air model's inputs: delivered power, sun behind the covers,
+    # occupancy, the house node, the blower and the interior-door coupling
+    rows = [(1.0, 19.0, 1.0, 0.4, 0.75), (0.5, 20.0, 1.0, 0.4, 0.75), (0.0, 21.0, 1.0, 0.4, 0.75)]
+    for i, (power, house, occupancy, door_mix, door_supply) in enumerate(rows):
         store.record(
             "room_a",
             {
                 "mode": "heating",
                 "model_power": power,
                 "model_solar": 0.2,
-                "model_residual": 0.1,
-                "model_occupancy": 1.0,
+                "model_occupancy": occupancy,
+                "model_house_temp": house,
+                "model_fan": 0.0,
+                "model_door_mix": door_mix,
+                "model_door_supply": door_supply,
             },
             600 + i * 60,
         )
+    read = store.read_detail("room_a")
+    assert read[0]["model_power"] == "1.0"
+    (bucket,) = store._downsample(read, bucket_seconds=300)
+    assert bucket["model_power"] == 0.5
+    assert bucket["model_solar"] == 0.2
+    assert bucket["model_occupancy"] == 1.0
+    assert bucket["model_house_temp"] == 20.0
+    assert bucket["model_fan"] == 0.0
+    assert bucket["model_door_mix"] == 0.4
+    assert bucket["model_door_supply"] == 0.75
+
+
+def test_the_obsolete_residual_heat_share_is_gone(history_dir):
+    """The cooling-only residual was replaced by the signed forced-air charge."""
+    from custom_components.roommind.utils.history_store import MODEL_INPUT_FIELDS
+
+    assert "model_residual" not in MODEL_INPUT_FIELDS
+    assert "model_residual" not in DETAIL_FIELDS
+    store = HistoryStore(history_dir)
+    store.record("room_a", {"mode": "heating", "model_residual": 0.4}, 600)
+    assert store.read_detail("room_a")[0]["model_power"] == ""
+
+
+def test_record_and_downsample_keep_the_central_hvac_columns(history_dir):
+    store = HistoryStore(history_dir)
+    store.record(
+        "room_a",
+        {
+            "mode": "heating",
+            "effective_temp": 20.0,
+            "priority_weight": 3.0,
+            "door_open": 1,
+            "fan_circulating": 0,
+        },
+        600,
+    )
+    store.record(
+        "room_a",
+        {
+            "mode": "heating",
+            "effective_temp": 21.0,
+            "priority_weight": 1.0,
+            "door_open": 0,
+            "fan_circulating": 1,
+        },
+        660,
+    )
     rows = store.read_detail("room_a")
-    assert rows[0]["model_power"] == "1.0"
+    assert (rows[0]["effective_temp"], rows[0]["priority_weight"]) == ("20.0", "3.0")
+    assert (rows[0]["door_open"], rows[0]["fan_circulating"]) == ("1", "0")
+
     (bucket,) = store._downsample(rows, bucket_seconds=300)
-    assert (bucket["model_power"], bucket["model_solar"], bucket["model_occupancy"]) == (0.5, 0.2, 1.0)
+    assert (bucket["effective_temp"], bucket["priority_weight"]) == (20.5, 2.0)
+    # The binary state columns keep the state the bucket starts in, like window_open
+    assert (bucket["door_open"], bucket["fan_circulating"]) == ("1", "0")
 
 
 def test_rows_without_model_inputs_leave_the_columns_empty(history_dir):
     store = HistoryStore(history_dir)
     store.record("room_a", {"mode": "idle"}, 600)
-    assert store.read_detail("room_a")[0]["model_power"] == ""
+    row = store.read_detail("room_a")[0]
+    assert row["model_power"] == ""
+    assert row["model_house_temp"] == ""
+    assert row["effective_temp"] == ""
+    assert row["circulate_starts"] == "0"
+
+
+def test_record_marks_the_rows_where_a_circulating_run_starts(history_dir):
+    store = HistoryStore(history_dir)
+    for i, mode in enumerate(["idle", "circulating", "circulating", "idle", "cooling"]):
+        store.record("room_a", {"mode": mode}, 1000 + i * 180)
+    rows = store.read_detail("room_a")
+    assert [r["circulate_starts"] for r in rows] == ["0", "1", "0", "0", "0"]
+    assert [r["cool_starts"] for r in rows] == ["0", "0", "0", "0", "1"]
+
+
+def test_downsample_sums_the_circulating_starts(history_dir):
+    store = HistoryStore(history_dir)
+    # Two circulating runs inside a 5-min bucket whose first row is idle
+    for i, mode in enumerate(["idle", "circulating", "idle", "circulating", "idle"]):
+        store.record("room_a", {"mode": mode}, 600 + i * 60)
+    buckets = store._downsample(store.read_detail("room_a"), bucket_seconds=300)
+    assert [b["mode"] for b in buckets] == ["idle"]
+    assert buckets[0]["circulate_starts"] == 2
+
+
+def test_migrate_header_rewrites_a_row_from_before_the_columns(history_dir):
+    """A detail file from an older release gains the new columns and loses model_residual."""
+    store = HistoryStore(history_dir)
+    os.makedirs(history_dir, exist_ok=True)
+    path = store._detail_path("room_a")
+    old_fields = ["timestamp", "room_temp", "mode", "model_power", "model_residual"]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=old_fields)
+        writer.writeheader()
+        writer.writerow(
+            {"timestamp": "1000", "room_temp": "20.0", "mode": "heating", "model_power": "0.5", "model_residual": "0.3"}
+        )
+
+    store.record("room_a", {"room_temp": 21.0, "mode": "heating", "model_house_temp": 19.0}, 1060)
+
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        assert reader.fieldnames == DETAIL_FIELDS
+        rows = list(reader)
+    assert rows[0]["room_temp"] == "20.0"
+    assert rows[0]["model_power"] == "0.5"
+    assert rows[0]["model_house_temp"] == ""
+    assert rows[0]["effective_temp"] == ""
+    assert "model_residual" not in rows[0]
+    assert rows[1]["model_house_temp"] == "19.0"
+
+
+def test_rotation_aggregates_the_central_hvac_columns(history_dir):
+    """A 48h -> 90d rotation averages the new numbers and sums the circulating starts."""
+    store = HistoryStore(history_dir)
+    now = time.time()
+    base = (now - 3 * 86400) // 300 * 300
+    rows = [
+        ("idle", 20.0, 1.0, 0),
+        ("circulating", 22.0, 2.0, 1),
+        ("circulating", 24.0, 3.0, 1),
+    ]
+    for i, (mode, effective, weight, fan) in enumerate(rows):
+        store.record(
+            "room_a",
+            {
+                "mode": mode,
+                "effective_temp": effective,
+                "priority_weight": weight,
+                "door_open": 1,
+                "fan_circulating": fan,
+                "model_fan": float(fan),
+                "model_house_temp": 20.0 + i,
+            },
+            base + i * 60,
+        )
+
+    store.rotate("room_a")
+
+    (bucket,) = store.read_history("room_a")
+    # Read back from the CSV: every aggregated cell is text
+    assert bucket["effective_temp"] == "22.0"
+    assert bucket["priority_weight"] == "2.0"
+    assert bucket["model_fan"] == "0.67"
+    assert bucket["model_house_temp"] == "21.0"
+    assert bucket["door_open"] == "1"
+    assert bucket["fan_circulating"] == "0"
+    assert bucket["circulate_starts"] == "1"
 
 
 @pytest.mark.parametrize("area_id", ["../outside", "../../x", "/abs/outside", "sub/room", ""])

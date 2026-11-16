@@ -40,6 +40,8 @@ def test_empty_history_has_no_figures():
     stats = compute_period_stats([], "auto")
     assert stats["hours"] == 0
     assert stats["heating_starts"] == 0
+    assert stats["circulating_hours"] == 0
+    assert stats["circulate_starts"] == 0
     assert stats["comfort"] is None
 
 
@@ -49,6 +51,15 @@ def test_hours_follow_the_time_between_samples():
     assert stats["heating_hours"] == pytest.approx(2 * STEP / 3600, abs=0.01)
     assert stats["cooling_hours"] == pytest.approx(STEP / 3600, abs=0.01)
     assert stats["hours"] == pytest.approx(5 * STEP / 3600, abs=0.01)
+
+
+def test_circulation_is_its_own_figure_not_a_conditioning_run():
+    """The blower mixes air without firing the furnace or heat pump: neither heating nor cooling."""
+    stats = compute_period_stats(_modes("circulating", "circulating", "heating", "idle"), "auto")
+    assert stats["circulating_hours"] == pytest.approx(2 * STEP / 3600, abs=0.01)
+    assert stats["heating_hours"] == pytest.approx(STEP / 3600, abs=0.01)
+    assert stats["cooling_hours"] == 0
+    assert stats["hours"] == pytest.approx(4 * STEP / 3600, abs=0.01)
 
 
 def test_a_gap_in_the_history_is_not_running_time():
@@ -61,6 +72,21 @@ def test_a_run_already_going_at_the_start_of_the_range_is_no_start():
     stats = compute_period_stats(_modes("heating", "idle", "heating", "cooling", "idle", "heating"), "auto")
     assert stats["heating_starts"] == 2
     assert stats["cooling_starts"] == 1
+
+
+def test_circulation_runs_count_like_the_conditioning_runs():
+    stats = compute_period_stats(_modes("idle", "circulating", "idle", "circulating", "heating"), "auto")
+    assert stats["circulate_starts"] == 2
+    assert stats["heating_starts"] == 1
+
+
+def test_circulation_starts_counted_when_recorded():
+    points = [
+        _point(0, mode="circulating", circulate_starts=2),
+        _point(1, mode="idle", circulate_starts=0),
+        _point(2, mode="idle", circulate_starts=1),
+    ]
+    assert compute_period_stats(points, "auto")["circulate_starts"] == 3
 
 
 def test_starts_counted_when_recorded_replace_the_transitions():
@@ -176,6 +202,19 @@ def test_rhythm_shares_are_parts_of_the_hour():
     assert rhythm is not None
     assert rhythm["days"][0]["heat"][7] == 0.25
     assert rhythm["days"][0]["window"][7] == 0.5
+
+
+def test_rhythm_carries_the_circulation_share_of_an_hour():
+    """Circulation is not heating or cooling: the grid keeps its own share for it."""
+    samples = _hour_of_samples(5, 7)
+    for s in samples[:3]:
+        s["mode"] = "circulating"
+    rhythm = compute_rhythm(_hour_of_samples(4, 7) + samples, "auto", _local_ts(5, 20))
+    assert rhythm is not None
+    day = rhythm["days"][0]
+    assert day["circulate"][7] == 0.15
+    assert day["heat"][7] == 0
+    assert day["circulate"][8] is None
 
 
 def test_rhythm_hours_carry_the_means_for_the_popup():

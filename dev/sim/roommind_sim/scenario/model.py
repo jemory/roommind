@@ -78,6 +78,21 @@ class CoverSpec:
 
 
 @dataclass
+class InteriorDoorSpec:
+    """A door between two rooms: ``sensor`` reports it, ``neighbor`` is the room behind it.
+
+    Declared on one side only. Both rooms are thermally linked by it (``open_door`` /
+    ``closed_door`` of the thermal profile), and the declaring room is the one the door
+    shuts off: its duct supply and its return-plenum loop are throttled while it is closed.
+    """
+
+    sensor: str
+    room: str
+    neighbor: str
+    open: bool = True
+
+
+@dataclass
 class RoomSpec:
     area_id: str
     name: str
@@ -87,6 +102,7 @@ class RoomSpec:
     sensors: list[SensorSpec] = field(default_factory=list)
     windows: list[WindowSpec] = field(default_factory=list)
     covers: list[CoverSpec] = field(default_factory=list)
+    interior_doors: list[InteriorDoorSpec] = field(default_factory=list)
     neighbors: dict[str, str | float] = field(default_factory=dict)
     initial: dict[str, float] = field(default_factory=dict)
 
@@ -150,6 +166,7 @@ class Scenario:
         for room in self.rooms.values():
             ids |= {w.sensor for w in room.windows if w.sensor}
             ids |= {c.entity_id for c in room.covers}
+            ids |= {d.sensor for d in room.interior_doors}
         for person in self.people:
             ids.add(f"person.{person.id}")
             ids.add(person.tracker)

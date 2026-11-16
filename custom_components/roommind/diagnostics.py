@@ -10,13 +10,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.core import HomeAssistant
 
-from .const import DEFAULT_CONTROL_MODE, DOMAIN, HEATING_SYSTEM_RADIATOR, VERSION
-from .control.mpc_controller import _active_targets, _last_commands, _now, _sent_at
-from .control.residual_heat import residual_tau
+from .const import DEFAULT_CONTROL_MODE, DOMAIN, VERSION, get_central_plant_settings
 from .utils.history_store import DETAIL_FIELDS
 
-# v2 adds what a simulation needs to rebuild a setup (device capabilities, referenced
-# entity states, full EKF state, schedule blocks, 48 h history).
+# v2 adds what a simulation needs to rebuild a setup (referenced entity states, the
+# full 9-state EKF, the Central Plant, schedule blocks, 48 h history).
 DIAGNOSTICS_SCHEMA_VERSION = 2
 HISTORY_48H_MAX_ROWS = 1000
 _ROOM_ENTITY_KEYS = (
@@ -26,23 +24,59 @@ _ROOM_ENTITY_KEYS = (
     "cover_schedule_selector_entity",
 )
 # Exports end up in public issues: no person entities, no timing of occupancy.
-_ROOM_ENTITY_LIST_KEYS = ("window_sensors", "occupancy_sensors", "covers")
+_ROOM_ENTITY_LIST_KEYS = (
+    "window_sensors",
+    "exterior_window_sensors",
+    "interior_door_sensors",
+    "occupancy_sensors",
+    "covers",
+    "read_only_covers",
+)
+# Climate attributes of the Central Thermostat worth exporting (a public issue needs these)
+_THERMOSTAT_ATTRIBUTES = (
+    "hvac_mode",
+    "hvac_modes",
+    "hvac_action",
+    "current_temperature",
+    "temperature",
+    "target_temp_low",
+    "target_temp_high",
+    "min_temp",
+    "max_temp",
+    "target_temp_step",
+    "preset_mode",
+    "preset_modes",
+    "fan_mode",
+    "fan_modes",
+    "supported_features",
+)
 _PRIVATE_DEVICE_CLASSES = ("occupancy", "presence", "motion")
 HISTORY_48H_FIELDS = [f for f in DETAIL_FIELDS if f != "occupancy"]
 
 
 def _build_model_info(estimator: Any) -> dict[str, Any]:
-    """Build model diagnostics from a ThermalEKF estimator."""
+    """Build model diagnostics from a ThermalEKF estimator.
+
+    The state vector is the 9-state Central Forced-Air model
+    ``x = [T, alpha_out, alpha_house, beta_h, beta_c, beta_fan, beta_s, beta_o, beta_f]``;
+    ``alpha`` stays as an alias of ``alpha_out`` for consumers of the older export.
+    """
     rc = estimator.get_model()
     return {
         "alpha": round(estimator._x[1], 6),
-        "beta_h": round(estimator._x[2], 4),
-        "beta_c": round(estimator._x[3], 4),
-        "beta_f": round(estimator._x[6], 4),
+        "alpha_out": round(estimator._x[1], 6),
+        "alpha_house": round(estimator._x[2], 4),
+        "beta_h": round(estimator._x[3], 4),
+        "beta_c": round(estimator._x[4], 4),
+        "beta_fan": round(estimator._x[5], 4),
+        "beta_s": round(estimator._x[6], 4),
+        "beta_o": round(estimator._x[7], 4),
+        "beta_f": round(estimator._x[8], 4),
         "n_updates": estimator._n_updates,
         "n_idle": estimator._n_idle,
         "n_heating": estimator._n_heating,
         "n_cooling": estimator._n_cooling,
+        "n_circulating": getattr(estimator, "_n_circulating", 0),
         "applicable_modes": sorted(estimator._applicable_modes),
         "P_diagonal": [round(estimator._P[i][i], 6) for i in range(len(estimator._x))],
         "prediction_std_idle": round(estimator.prediction_std(0.0, 20.0, 15.0, 5.0), 4),
@@ -52,61 +86,66 @@ def _build_model_info(estimator: Any) -> dict[str, Any]:
     }
 
 
-def _build_device_states(hass: HomeAssistant, devices: list[dict]) -> list[dict[str, Any]]:
-    """Build HA entity state snapshot for each device."""
-    result = []
-    for dev in devices:
-        eid = dev.get("entity_id", "")
-        state = hass.states.get(eid)
-        entry: dict[str, Any] = {
-            "entity_id": eid,
-            "type": dev.get("type", ""),
-            "role": dev.get("role", ""),
-            "idle_action": dev.get("idle_action", "off"),
-            "idle_fan_mode": dev.get("idle_fan_mode", ""),
-            "setback_auto_off": dev.get("setback_auto_off", False),
-            "setpoint_mode": dev.get("setpoint_mode", "proportional"),
-            "setpoint_offset": dev.get("setpoint_offset", 0.0),
-            "coil_dry": dev.get("coil_dry", "inherit"),
-            "coil_dry_minutes": dev.get("coil_dry_minutes", 0),
-            "coil_dry_mode": dev.get("coil_dry_mode", ""),
-            "coil_dry_fan_mode": dev.get("coil_dry_fan_mode", ""),
-            "valve_opening_entity": dev.get("valve_opening_entity", ""),
-            "valve_closing_entity": dev.get("valve_closing_entity", ""),
-            "valve_closing_mode": dev.get("valve_closing_mode", "closing_degree"),
-        }
-        if state:
-            attrs = state.attributes
-            entry["ha_state"] = state.state
-            entry["hvac_mode"] = attrs.get("hvac_mode")
-            entry["hvac_modes"] = attrs.get("hvac_modes", [])
-            entry["current_temperature"] = attrs.get("current_temperature")
-            entry["temperature"] = attrs.get("temperature")
-            entry["min_temp"] = attrs.get("min_temp")
-            entry["max_temp"] = attrs.get("max_temp")
-            entry["target_temp_low"] = attrs.get("target_temp_low")
-            entry["target_temp_high"] = attrs.get("target_temp_high")
-            entry["fan_mode"] = attrs.get("fan_mode")
-            entry["fan_modes"] = attrs.get("fan_modes", [])
-            entry["target_temp_step"] = attrs.get("target_temp_step")
-            entry["supported_features"] = attrs.get("supported_features")
-            entry["hvac_action"] = attrs.get("hvac_action")
-            entry["preset_mode"] = attrs.get("preset_mode")
-            entry["preset_modes"] = attrs.get("preset_modes")
-            entry["assumed_state"] = attrs.get("assumed_state", False)
-        else:
-            entry["ha_state"] = "not_found"
-        last_cmd = _last_commands.get(eid)
-        if last_cmd:
-            entry["last_command"] = dict(last_cmd)
-        now = _now()
-        ages = {service: round(now - ts) for (cmd_eid, service), ts in _sent_at.items() if cmd_eid == eid}
-        if ages:
-            entry["command_age_s"] = ages
-        if eid in _active_targets:
-            entry["active_target"] = list(_active_targets[eid])
-        result.append(entry)
-    return result
+def _thermostat_snapshot(hass: HomeAssistant, entity_id: str) -> dict[str, Any]:
+    """Live state and climate attributes of the Central Thermostat (or "not_found")."""
+    state = hass.states.get(entity_id)
+    if state is None:
+        return {"entity_id": entity_id, "state": "not_found"}
+    attrs = state.attributes
+    return {
+        "entity_id": entity_id,
+        "state": state.state,
+        **{key: attrs.get(key) for key in _THERMOSTAT_ATTRIBUTES if key in attrs},
+    }
+
+
+def _live_snapshot(value: Any) -> Any:
+    """A manager's live state as plain data: dicts pass through, objects use ``to_dict``."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return dict(value)
+    to_dict = getattr(value, "to_dict", None)
+    return to_dict() if callable(to_dict) else None
+
+
+def _build_central_plant_snapshot(hass: HomeAssistant, settings: dict, coordinator: Any) -> dict[str, Any]:
+    """Everything about the shared forced-air plant a public issue needs.
+
+    The resolved plant settings, the Central Thermostat's live state, the coordinator's
+    live plant summary and the two stateful helpers behind it (the wet-coil charge that
+    blocks Circulation and the equipment guards that outlive a control cycle).
+    """
+    plant = get_central_plant_settings(settings)
+    thermostat = str(plant.get("thermostat_entity") or "")
+    snapshot: dict[str, Any] = {
+        "settings": plant,
+        "thermostat_entity": thermostat,
+    }
+    if thermostat:
+        snapshot["thermostat"] = _thermostat_snapshot(hass, thermostat)
+    if coordinator is None:
+        return snapshot
+    live = _live_snapshot(getattr(coordinator, "central_plant", None))
+    if live is not None:
+        snapshot["live"] = live
+    wet_coil = _live_snapshot(getattr(coordinator, "_wet_coil", None))
+    if wet_coil is not None:
+        snapshot["wet_coil"] = wet_coil
+    plant_manager = _live_snapshot(getattr(coordinator, "_plant_manager", None))
+    if plant_manager is not None:
+        snapshot["plant_manager"] = plant_manager
+    return snapshot
+
+
+def _rebound_charge(coordinator: Any, area_id: str) -> float | None:
+    """Signed air/mass charge of the room's forced-air run, None without a tracker."""
+    tracker = getattr(coordinator, "_rebound_tracker", None)
+    charge = getattr(tracker, "charge", None)
+    if not callable(charge):
+        return None
+    value = charge(area_id)
+    return round(float(value), 4) if isinstance(value, int | float) else None
 
 
 def _plain(value: Any) -> Any:
@@ -188,48 +227,6 @@ def _build_cover_state(coordinator: Any, area_id: str) -> dict[str, Any] | None:
     return result
 
 
-def _build_compressor_state(coordinator: Any) -> dict[str, Any]:
-    """Build compressor group manager state."""
-    cgm = coordinator._compressor_manager
-    # CompressorGroupManager stores time.monotonic() stamps, not wall-clock time
-    now = time.monotonic()
-    groups: dict[str, Any] = {}
-    for gid, state in cgm._states.items():
-        group_cfg = cgm._groups.get(gid)
-        entry: dict[str, Any] = {
-            "active_members": sorted(state.active_members),
-            "min_run_s": group_cfg.min_run_seconds if group_cfg else None,
-            "min_off_s": group_cfg.min_off_seconds if group_cfg else None,
-        }
-        if state.compressor_on_since:
-            entry["on_for_s"] = round(now - state.compressor_on_since)
-        if state.compressor_off_since:
-            entry["off_for_s"] = round(now - state.compressor_off_since)
-        if group_cfg and (group_cfg.master_entity or group_cfg.enforce_uniform_mode):
-            entry["master_entity"] = group_cfg.master_entity
-            entry["master_action"] = state.master_action
-            entry["conflict_resolution"] = group_cfg.conflict_resolution
-            entry["enforce_uniform_mode"] = group_cfg.enforce_uniform_mode
-            if group_cfg.action_script:
-                entry["action_script"] = group_cfg.action_script
-            if state.master_on_since:
-                entry["master_on_for_s"] = round(now - state.master_on_since)
-        groups[gid] = entry
-    return groups
-
-
-def _build_valve_state(coordinator: Any) -> dict[str, Any]:
-    """Build valve manager state."""
-    vm = coordinator._valve_manager
-    now = time.time()
-    result: dict[str, Any] = {
-        "currently_cycling": {eid: round(now - ts) for eid, ts in vm._cycling.items()},
-    }
-    if vm._last_actuation:
-        result["last_actuation"] = {eid: round(now - ts) for eid, ts in vm._last_actuation.items()}
-    return result
-
-
 async def async_get_config_entry_diagnostics(hass: HomeAssistant, config_entry: ConfigEntry) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
     data = hass.data.get(DOMAIN, {})
@@ -287,26 +284,11 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, config_entry: 
                 live_diag["cached_temp"] = cached[0]
                 live_diag["cached_temp_age_s"] = round(time.monotonic() - cached[1])
 
-        # Residual heat state
+        # Forced-air state: the signed air/mass charge of the run in progress
         if coordinator:
-            # Radiators use the learned size and decay time of their afterglow (as the controller)
-            radiator = config.get("heating_system_type", "") == HEATING_SYSTEM_RADIATOR
-            scale = coordinator._model_manager.get_residual_scale(area_id) if radiator else 1.0
-            tau = coordinator._model_manager.get_residual_tau(area_id) if radiator else None
-            live_diag["q_residual"] = round(
-                coordinator._residual_tracker.get_q_residual(
-                    area_id,
-                    config.get("heating_system_type", ""),
-                    coordinator._previous_modes.get(area_id, "idle"),
-                    scale,
-                    tau,
-                ),
-                4,
-            )
-            if radiator:
-                live_diag["residual_scale"] = round(scale, 3)
-                live_diag["residual_decay_minutes"] = round(residual_tau("radiator", tau), 1)
-            live_diag["q_rebound"] = round(coordinator._rebound_tracker.get_charge(area_id), 4)
+            charge = _rebound_charge(coordinator, area_id)
+            if charge is not None:
+                live_diag["q_rebound"] = charge
 
         # Schedule entity state
         schedules = config.get("schedules", [])
@@ -323,11 +305,6 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, config_entry: 
             "config": dict(config),
             "live": live_diag,
         }
-
-        # Device entity states
-        devices = config.get("devices", [])
-        if devices:
-            room_diag["device_states"] = _build_device_states(hass, devices)
 
         room_diag["entities"] = _build_entity_states(hass, config)
 
@@ -356,9 +333,10 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, config_entry: 
             if cover:
                 room_diag["cover"] = cover
 
-        # Heat source orchestration state
-        if coordinator and area_id in coordinator._heat_source_states:
-            room_diag["heat_source_routing"] = coordinator._heat_source_states[area_id]
+        # Heat source routing of the room, when the orchestration still reports it
+        states = getattr(coordinator, "_heat_source_states", {}) if coordinator else {}
+        if area_id in states:
+            room_diag["heat_source_routing"] = states[area_id]
 
         rooms_diag[area_id] = room_diag
 
@@ -403,15 +381,8 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, config_entry: 
             except Exception:  # noqa: BLE001
                 history_48h[area_id] = []
 
-    # Compressor group state
-    compressor: dict[str, Any] = {}
-    if coordinator:
-        compressor = _build_compressor_state(coordinator)
-
-    # Valve protection state
-    valve: dict[str, Any] = {}
-    if coordinator:
-        valve = _build_valve_state(coordinator)
+    # Central Plant: the shared forced-air system behind every room decision
+    central_plant = _build_central_plant_snapshot(hass, settings, coordinator)
 
     return {
         "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
@@ -431,11 +402,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, config_entry: 
         "outdoor": outdoor,
         "recent_history": recent_history,
         "history_48h": history_48h,
-        "compressor_groups": compressor,
-        "valve_protection": valve,
-        "coil_dry_state": (coordinator._coil_dry_manager.get_state() if coordinator is not None else {}),
-        # Live AC sensor offsets {entity: {"heat"|"cool"|"idle": [offset K, readings]}}; settings hold the last save
-        "ac_head_offsets": (coordinator._head_offsets.get_state() if coordinator is not None else {}),
+        "central_plant": central_plant,
         "presence": {
             "enabled": settings.get("presence_enabled", False),
             "persons": settings.get("presence_persons", []),

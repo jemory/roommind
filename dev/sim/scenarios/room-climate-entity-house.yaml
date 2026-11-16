@@ -1,99 +1,126 @@
 name: room-climate-entity-house
 description: >
-  One room per kind for the room climate entity (#238): auto with radiator and heat pump AC
-  plus window sensor, heat only without schedule, cool only, Managed Mode without room sensor,
-  an outdoor area. Base for live checks of entity state, presets, modes, area assignment and
-  Assist; the batch run only checks that nothing changes without the entity being used.
+  One room per kind for the room climate entity (#238) in a house run by a single Central
+  Plant: auto with an exterior window sensor, heat only without a schedule, cool only, a
+  room behind a shut Interior Door, and an outdoor area. Base for live checks of entity
+  state, presets, modes, area assignment and Assist; the batch run only checks that nothing
+  changes without the entity being used. No room lists a device: the Central Thermostat
+  runs the whole house.
 refs: [238]
-tags: [entities]
+tags: [entities, central-plant]
 start: 2026-01-12T00:00
 duration: 1d
-location: {latitude: 52.5, longitude: 13.4, time_zone: Europe/Berlin}
+location: {latitude: 40.7, longitude: -74.0, time_zone: America/New_York, unit_system: us_customary, country: US}
 weather: {profile: temperate}
 house:
-  building: bestand_teilsaniert
-  outdoor: {sensors: {temperature: sensor.aussen_temp}}
+  building: us_wood_frame
+  floors: {ground: Ground floor, upper: Upstairs}
+  outdoor: {sensors: {temperature: sensor.outdoor_temp, humidity: sensor.outdoor_humidity}}
   rooms:
-    wohnzimmer:
-      name: Wohnzimmer
-      floor_area_m2: 25
+    living_room:
+      name: Living room
+      floor: ground
+      floor_area_m2: 28
+      exterior_wall_m2: 18
       initial: {temperature: 19.5}
-      windows: [{orientation: S, area_m2: 3, sensor: binary_sensor.wohnzimmer_fenster}]
+      windows: [{orientation: S, area_m2: 3, sensor: binary_sensor.living_room_window}]
       devices:
-        - {entity_id: climate.wohnzimmer_trv, profile: generic_trv}
-        - {entity_id: climate.wohnzimmer_ac, profile: generic_split_ac}
-      sensors: {temperature: {entity_id: sensor.wohnzimmer_temp}, humidity: {entity_id: sensor.wohnzimmer_feuchte}}
-    schlafzimmer:
-      name: Schlafzimmer
+        - {entity_id: climate.central_hvac, profile: central_furnace_hp, serves_rooms: [bedroom, office, bathroom], supply_shares: {living_room: 0.4, bedroom: 0.25, office: 0.2, bathroom: 0.15}}
+      sensors:
+        temperature: {entity_id: sensor.living_room_temp}
+        humidity: {entity_id: sensor.living_room_humidity}
+    bedroom:
+      name: Bedroom
+      floor: upper
       floor_area_m2: 14
+      exterior_wall_m2: 9
       initial: {temperature: 18.0}
-      devices: [{entity_id: climate.schlafzimmer_trv, profile: generic_trv}]
-      sensors: {temperature: {entity_id: sensor.schlafzimmer_temp}}
-    buero:
-      name: Büro
+      windows: [{orientation: E, area_m2: 1.5}]
+      interior_doors: [{sensor: binary_sensor.bedroom_door, neighbor: living_room, open: false}]
+      sensors: {temperature: {entity_id: sensor.bedroom_temp}}
+    office:
+      name: Office
+      floor: upper
       floor_area_m2: 12
+      exterior_wall_m2: 8
       initial: {temperature: 22.0}
-      devices: [{entity_id: climate.buero_ac, profile: generic_split_ac}]
-      sensors: {temperature: {entity_id: sensor.buero_temp}}
-    bad:
-      name: Bad
-      floor_area_m2: 8
+      windows: [{orientation: S, area_m2: 2}]
+      sensors: {temperature: {entity_id: sensor.office_temp}}
+    bathroom:
+      name: Bathroom
+      floor: ground
+      floor_area_m2: 6
+      exterior_wall_m2: 7
       initial: {temperature: 20.0}
-      devices: [{entity_id: climate.bad_trv, profile: generic_trv}]
-    terrasse:
-      name: Terrasse
+      windows: [{orientation: N, area_m2: 0.6}]
+      sensors:
+        temperature: {entity_id: sensor.bathroom_temp}
+        humidity: {entity_id: sensor.bathroom_humidity}
+    terrace:
+      name: Terrace
+      floor: ground
       floor_area_m2: 10
       initial: {temperature: 8.0}
-      sensors: {temperature: {entity_id: sensor.terrasse_temp}}
+      sensors: {temperature: {entity_id: sensor.terrace_temp}}
 people:
-  - {id: anna, profile: commuter, rooms: {sleeping: schlafzimmer, living: wohnzimmer}}
+  - {id: anna, profile: commuter, rooms: {sleeping: bedroom, living: living_room}}
 helpers:
   schedule:
-    plan_wohnen: {weekdays: ["06:00-08:00", "16:30-22:30"], weekend: ["07:30-23:00"]}
-    plan_buero: {weekdays: ["08:00-17:30"]}
+    plan_living: {weekdays: ["06:00-08:00", "16:30-22:30"], weekend: ["07:30-23:00"]}
+    plan_office: {weekdays: ["08:00-17:30"]}
 roommind:
   settings:
-    outdoor_temp_sensor: sensor.aussen_temp
+    outdoor_temp_sensor: sensor.outdoor_temp
+    outdoor_humidity_sensor: sensor.outdoor_humidity
     presence_enabled: true
     presence_persons: [person.anna]
+    weather_entity: weather.simhome
+    central_plant:
+      thermostat_entity: climate.central_hvac
+      nudge_delta_c: 1.5
+      max_nudge_headroom_c: 3.0
+      fallback_heat_c: 16.5
+      fallback_cool_c: 27.0
+      min_deadband_c: 2.5
+      min_run_minutes: 10
+      min_off_minutes: 5
+      exterior_open_policy: pause_unless_door_closed
   rooms:
-    wohnzimmer:
-      devices:
-        - {entity_id: climate.wohnzimmer_trv, type: trv, heating_system_type: radiator}
-        - {entity_id: climate.wohnzimmer_ac, type: ac}
-      temperature_sensor: sensor.wohnzimmer_temp
-      humidity_sensor: sensor.wohnzimmer_feuchte
-      window_sensors: [binary_sensor.wohnzimmer_fenster]
+    living_room:
+      temperature_sensor: sensor.living_room_temp
+      humidity_sensor: sensor.living_room_humidity
+      exterior_window_sensors: [binary_sensor.living_room_window]
       climate_mode: auto
-      schedules: [{entity_id: schedule.plan_wohnen}]
+      schedules: [{entity_id: schedule.plan_living}]
       comfort_heat: 21.0
       comfort_cool: 24.0
       eco_heat: 18.0
       eco_cool: 27.0
-    schlafzimmer:
-      devices: [{entity_id: climate.schlafzimmer_trv, type: trv, heating_system_type: radiator}]
-      temperature_sensor: sensor.schlafzimmer_temp
+    bedroom:
+      temperature_sensor: sensor.bedroom_temp
+      interior_door_sensors: [binary_sensor.bedroom_door]
       climate_mode: heat_only
-      comfort_temp: 19.0
-      eco_temp: 16.0
+      comfort_heat: 19.0
+      eco_heat: 16.0
       ignore_presence: true
-    buero:
-      devices: [{entity_id: climate.buero_ac, type: ac}]
-      temperature_sensor: sensor.buero_temp
+    office:
+      temperature_sensor: sensor.office_temp
       climate_mode: cool_only
-      schedules: [{entity_id: schedule.plan_buero}]
-      comfort_temp: 24.0
-      eco_temp: 27.0
-    bad:
-      devices: [{entity_id: climate.bad_trv, type: trv, idle_action: low}]
+      schedules: [{entity_id: schedule.plan_office}]
+      comfort_cool: 24.0
+      eco_cool: 27.0
+    bathroom:
+      temperature_sensor: sensor.bathroom_temp
+      humidity_sensor: sensor.bathroom_humidity
       climate_mode: heat_only
-      comfort_temp: 22.0
-      eco_temp: 19.0
+      comfort_heat: 22.0
+      eco_heat: 19.0
       ignore_presence: true
-    terrasse:
-      temperature_sensor: sensor.terrasse_temp
+    terrace:
+      temperature_sensor: sensor.terrace_temp
       is_outdoor: true
 expect:
   - {invariant: target_never_empty}
   - {invariant: no_rejected_commands}
-  - {check: "room.wohnzimmer.override_active == false and room.schlafzimmer.override_active == false", label: no override without using the entity}
+  - {invariant: setpoints_within_device_range}
+  - {check: "room.living_room.override_active == false and room.bedroom.override_active == false", label: no override without using the entity}

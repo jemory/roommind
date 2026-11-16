@@ -1,46 +1,59 @@
 name: covers-heating-season
 description: >
-  Early March, clear skies, cold nights: a south-facing living room heated by a split
-  heat pump (heat and cool, climate mode auto), exterior blind under automatic control.
-  The room needs heat every morning and the sun warms it in the afternoon. Solar gain
-  is welcome here, so the blind must not shade while the room heats, and the sun
-  alone must not close it as long as the room stays below its cooling target. The
-  outdoor gate is disabled (covers_outdoor_min_temp 0) so it cannot mask the check.
-tags: [covers, solar, ac]
+  Early March, clear skies, cold nights: a south-facing living room heated by the Central
+  Plant's furnace (climate mode auto), exterior blind under automatic control. The room
+  needs heat every morning and the sun warms it in the afternoon. Solar gain is welcome
+  here, so the blind must not shade while the room heats, and the sun alone must not close
+  it as long as the room stays below its cooling target. The outdoor gate is disabled
+  (covers_outdoor_min_temp 0) so it cannot mask the check.
+tags: [covers, solar, central-plant]
 start: 2026-03-02T00:00
 duration: 7d
-location: {latitude: 52.5, longitude: 13.4, time_zone: Europe/Berlin}
+location: {latitude: 40.7, longitude: -74.0, time_zone: America/New_York, unit_system: us_customary, country: US}
 weather: {profile: temperate, fixed: {cloud: 10}}
 house:
-  building: bestand_teilsaniert
-  outdoor: {sensors: {temperature: sensor.aussen_temp}}
+  building: us_wood_frame
+  outdoor: {sensors: {temperature: sensor.outdoor_temp}}
   rooms:
-    wohnzimmer:
+    living_room:
+      name: Living room
       floor_area_m2: 26
       exterior_wall_m2: 14
       initial: {temperature: 20.5, mass_temperature: 20.5}
       windows: [{orientation: S, area_m2: 4, g_value: 0.6}]
-      covers: [{entity_id: cover.wohnzimmer_raffstore, profile: venetian_blind}]
-      devices: [{entity_id: climate.wz_ac, profile: generic_split_ac}]
+      covers: [{entity_id: cover.living_room_blind, profile: venetian_blind}]
+      devices:
+        - {entity_id: climate.central_hvac, profile: central_furnace_hp, serves_rooms: [], heat_capacity_w: 7000}
       sensors:
-        temperature: {entity_id: sensor.wz_temp}
+        temperature: {entity_id: sensor.living_room_temp}
 roommind:
   settings:
-    outdoor_temp_sensor: sensor.aussen_temp
+    outdoor_temp_sensor: sensor.outdoor_temp
     weather_entity: weather.simhome
-    control_mode: mpc
+    central_plant:
+      thermostat_entity: climate.central_hvac
+      nudge_delta_c: 1.5
+      max_nudge_headroom_c: 3.0
+      fallback_heat_c: 16.5
+      fallback_cool_c: 27.0
+      min_deadband_c: 2.5
+      min_run_minutes: 10
+      min_off_minutes: 5
+      exterior_open_policy: pause_unless_door_closed
   rooms:
-    wohnzimmer:
-      devices: [{entity_id: climate.wz_ac, type: ac}]
-      temperature_sensor: sensor.wz_temp
+    living_room:
+      temperature_sensor: sensor.living_room_temp
       climate_mode: auto
       comfort_heat: 21.0
       comfort_cool: 24.5
-      covers: [cover.wohnzimmer_raffstore]
+      eco_heat: 17.0
+      eco_cool: 27.0
+      covers: [cover.living_room_blind]
       covers_auto_enabled: true
       covers_outdoor_min_temp: 0
 expect:
   - {invariant: no_rejected_commands}
-  - {metric: cover.shaded_while_heating_h, entity_id: cover.wohnzimmer_raffstore, max: 0, label: no shading while the room heats}
-  - {metric: cover.max_commands_per_day, entity_id: cover.wohnzimmer_raffstore, max: 6, label: cover moves per day}
-  - {metric: comfort.undershoot_kh, room: wohnzimmer, max: 10}
+  - {invariant: setpoints_within_device_range}
+  - {metric: cover.shaded_while_heating_h, entity_id: cover.living_room_blind, max: 0, label: no shading while the room heats}
+  - {metric: cover.max_commands_per_day, entity_id: cover.living_room_blind, max: 6, label: cover moves per day}
+  - {metric: comfort.undershoot_kh, room: living_room, max: 10}

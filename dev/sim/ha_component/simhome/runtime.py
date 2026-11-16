@@ -148,6 +148,8 @@ class SimRuntime:
             for w in room.windows:
                 if w.sensor:
                     rooms_by_entity[w.sensor] = room.area_id
+            for d in room.interior_doors:
+                rooms_by_entity[d.sensor] = room.area_id
             for c in room.covers:
                 rooms_by_entity[c.entity_id] = room.area_id
         devices = dr.async_get(self.hass)

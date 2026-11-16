@@ -1,0 +1,117 @@
+name: central-occupancy-priority-and-trends
+description: >
+  Multi-room house in January on one Central Plant. The office is occupied through the
+  working day, the living_room is used in the evening, and the guest_room is empty all
+  week. Only occupied Thermal Zones may drive comfort cycles: the empty guest_room must
+  stay inside the Guardrail Band (16..28 °C) without ever calling the furnace, and a
+  90 s pass-through (a dwell blip far below the dwell and off-delay thresholds) must not
+  turn into a heating spike. The occupied office has to hold its comfort band
+  (comfort.in_band_pct >= 85) while the empty room only carries guardrail weight.
+refs: [1, 3]
+tags: [central-plant, occupancy, priority, guardrail]
+start: 2026-01-12T00:00
+duration: 2d
+location: {latitude: 40.7, longitude: -74.0, time_zone: America/New_York, unit_system: us_customary, country: US}
+weather: {profile: temperate}
+house:
+  building: us_wood_frame
+  floors: {ground: Ground floor, upper: Upstairs}
+  outdoor: {sensors: {temperature: sensor.outdoor_temp}}
+  rooms:
+    living_room:
+      name: Living room
+      floor: ground
+      floor_area_m2: 40
+      exterior_wall_m2: 24
+      initial: {temperature: 19.0}
+      windows: [{orientation: S, area_m2: 4, g_value: 0.6}]
+      devices:
+        - {entity_id: climate.central_hvac, profile: central_furnace_hp, serves_rooms: [office, guest_room], supply_shares: {living_room: 0.5, office: 0.3, guest_room: 0.2}}
+      sensors:
+        temperature: {entity_id: sensor.living_room_temp}
+        occupancy: {entity_id: binary_sensor.living_room_presence}
+    office:
+      name: Office
+      floor: upper
+      floor_area_m2: 18
+      exterior_wall_m2: 12
+      initial: {temperature: 18.0}
+      windows: [{orientation: E, area_m2: 2, g_value: 0.6}]
+      sensors:
+        temperature: {entity_id: sensor.office_temp}
+        occupancy: {entity_id: binary_sensor.office_presence}
+    guest_room:
+      name: Guest room
+      floor: upper
+      floor_area_m2: 12
+      exterior_wall_m2: 8
+      initial: {temperature: 17.0}
+      windows: [{orientation: N, area_m2: 1.5, g_value: 0.6}]
+      sensors:
+        temperature: {entity_id: sensor.guest_room_temp}
+        occupancy: {entity_id: binary_sensor.guest_room_presence}
+people:
+  - id: robin
+    plan:
+      presence: {weekday: ["home@00:00"], weekend: ["home@00:00"]}
+      rooms: {office: "08:30-17:00", living: "default"}
+    rooms: {office: office, living: living_room}
+roommind:
+  settings:
+    outdoor_temp_sensor: sensor.outdoor_temp
+    weather_entity: weather.simhome
+    central_plant:
+      thermostat_entity: climate.central_hvac
+      nudge_delta_c: 1.5
+      max_nudge_headroom_c: 3.0
+      fallback_heat_c: 16.5
+      fallback_cool_c: 27.0
+      min_deadband_c: 2.5
+      min_run_minutes: 15
+      min_off_minutes: 5
+      exterior_open_policy: pause_unless_door_closed
+  rooms:
+    living_room:
+      temperature_sensor: sensor.living_room_temp
+      occupancy_sensors: [binary_sensor.living_room_presence]
+      occupancy_mode: reactive_and_trend
+      occupancy_eco_delay: 10
+      climate_mode: heat_only
+      comfort_heat: 21.0
+      eco_heat: 18.0
+    office:
+      temperature_sensor: sensor.office_temp
+      occupancy_sensors: [binary_sensor.office_presence]
+      occupancy_mode: reactive_and_trend
+      occupancy_eco_delay: 10
+      climate_mode: heat_only
+      comfort_heat: 21.0
+      eco_heat: 17.0
+    guest_room:
+      temperature_sensor: sensor.guest_room_temp
+      occupancy_sensors: [binary_sensor.guest_room_presence]
+      # Never a driver: guarded, never comfort-cycled.
+      occupancy_mode: guardrail_only
+      climate_mode: heat_only
+      comfort_heat: 19.0
+      eco_heat: 16.0
+timeline:
+  # A 90 s walk-through: the PIR blips, the room is not dwelled in.
+  - {at: "+0d12h00m", do: occupancy.set, room: guest_room, count: 1, for: 90s}
+expect:
+  - {invariant: no_rejected_commands}
+  - {invariant: setpoints_within_device_range}
+  # Guardrail Band, all day and night
+  - {check: "true_temp('guest_room') >= 16.0 and true_temp('guest_room') <= 28.0", at: "+0d04h", label: empty guest_room inside its guardrails at night}
+  - {check: "true_temp('guest_room') >= 16.0 and true_temp('guest_room') <= 28.0", at: "+0d13h", label: empty guest_room inside its guardrails at midday}
+  - {check: "true_temp('guest_room') >= 16.0 and true_temp('guest_room') <= 28.0", at: "+0d21h", label: empty guest_room inside its guardrails in the evening}
+  # The pass-through must not become a comfort cycle: the room keeps its guardrail
+  # target and stays idle, so the furnace is not started for it.
+  - {check: "room.guest_room.heat_target <= 16.5 and room.guest_room.mode == 'idle'", at: "+0d12h05m", label: 90 s pass-through does not lift the guardrail target}
+  - {check: "room.guest_room.mode == 'idle' and room.guest_room.heat_target <= 16.5", at: "+0d12h10m", label: pass-through does not spike heating}
+  - {check: "room.guest_room.mode == 'idle'", at: "+0d13h00m", label: guest_room stays idle after the blip}
+  # Room Priority follows the people: comfort in the occupied office, eco once it empties.
+  - {check: "room.office.heat_target == 21.0", at: "+0d10h", label: occupied office drives comfort}
+  - {check: "room.office.heat_target == 17.0", at: "+0d18h", label: empty office falls back to eco}
+  - {metric: comfort.in_band_pct, room: office, min: 85, label: occupied office holds its comfort band}
+  - {metric: comfort.in_band_pct, room: living_room, min: 80, label: living_room holds its comfort band when used}

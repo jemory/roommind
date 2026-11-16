@@ -8,23 +8,24 @@
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type {
+  ExteriorOpenPolicy,
   HomeAssistant,
+  PriceShiftModes,
   GlobalSettings,
   RoomConfig,
   NotificationTarget,
-  CompressorGroup,
   RoomWithoutArea,
   PriceStatus,
 } from "../types";
+import { PLANT_FIELDS, readPlantFields, writePlantFields } from "../utils/plant-settings";
 import { localize } from "../utils/localize";
 import { errorText } from "../utils/errors";
 import { fireSaveStatus } from "../utils/events";
 import { VACATION_SENTINEL } from "../utils/constants";
-import { formatMinutes, formatNumber, formatPercent } from "../utils/format";
+import { formatNumber, formatPercent } from "../utils/format";
 import { learningRoomIds } from "../utils/learning";
 import { formatTempLocale, tempUnit, toDisplayDelta } from "../utils/temperature";
 import { describePriceStatus } from "../utils/price-status";
-import { fanModeLabel, type FanModeOption } from "../utils/device-utils";
 import { tokens, alertStyles } from "../styles/tokens";
 import {
   SETTINGS_GROUPS,
@@ -40,17 +41,12 @@ import "./settings/rs-settings-price";
 import "./settings/rs-settings-control";
 import "./settings/rs-settings-presence";
 import "./settings/rs-settings-vacation";
-import "./settings/rs-settings-valve";
-import { compressorGroupProblem } from "./settings/rs-settings-compressor";
-import "./settings/rs-settings-coil-dry";
+import "./settings/rs-settings-plant";
 import "./settings/rs-settings-mold";
 import "./settings/rs-settings-notifications";
 import "./settings/rs-settings-learning";
 import "./settings/rs-settings-reset";
 import "./settings/rs-settings-orphans";
-
-/** Compressor groups the backend would reject (no member yet, conflicts), kept for the session. */
-let compressorDrafts: CompressorGroup[] = [];
 
 type FieldValues = Record<string, unknown>;
 
@@ -76,6 +72,13 @@ function tsToDatetimeLocal(ts: number): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
+
+/** The central_plant block goes out and comes in as a whole: the backend merges a partial block. */
+const plantSync: SettingSync = {
+  fields: PLANT_FIELDS,
+  read: readPlantFields,
+  write: writePlantFields,
+};
 
 /**
  * Every setting the page edits. A save sends only the settings whose fields changed here, so a
@@ -129,34 +132,7 @@ const SETTINGS: [keyof GlobalSettings, SettingSync][] = [
   ["presence_away_action", plain("presenceAwayAction", "eco")],
   ["presence_clears_override", plain("presenceClearsOverride", false)],
   ["schedule_off_action", plain("scheduleOffAction", "eco")],
-  ["valve_protection_enabled", plain("valveProtectionEnabled", false)],
-  ["valve_protection_interval_days", plain("valveProtectionInterval", 7)],
-  [
-    "compressor_groups",
-    {
-      fields: ["compressorGroups"],
-      // Drafts that could not be saved yet survive a reload of the page
-      read: (value) => {
-        const stored = (value as CompressorGroup[] | undefined) ?? [];
-        return {
-          compressorGroups: [
-            ...stored,
-            ...compressorDrafts.filter((d) => !stored.some((g) => g.id === d.id)),
-          ],
-        };
-      },
-      write: (v) => {
-        const groups = v.compressorGroups as CompressorGroup[];
-        return groups.filter((g) => compressorGroupProblem(g, groups) === null);
-      },
-    },
-  ],
-  ["coil_dry_enabled", plain("coilDryEnabled", false)],
-  ["coil_dry_minutes", plain("coilDryMinutes", 20)],
-  ["coil_dry_mode", plain("coilDryMode", "fan_only")],
-  ["coil_dry_fan_mode", plain("coilDryFanMode", "low")],
-  ["coil_dry_min_cooling_minutes", plain("coilDryMinCoolingMinutes", 10)],
-  ["coil_dry_drain_minutes", plain("coilDryDrainMinutes", 0)],
+  ["central_plant", plantSync],
   ["mold_detection_enabled", plain("moldDetectionEnabled", false)],
   ["mold_humidity_threshold", plain("moldHumidityThreshold", 70)],
   ["mold_f_rsi", plain("moldFRsi", 0.8)],
@@ -216,8 +192,28 @@ export class RsSettings extends LitElement {
   @state() private _presenceAwayAction: "eco" | "off" = "eco";
   @state() private _presenceClearsOverride = false;
   @state() private _scheduleOffAction: "eco" | "off" = "eco";
-  @state() private _valveProtectionEnabled = false;
-  @state() private _valveProtectionInterval = 7;
+  @state() private _thermostatEntity = "";
+  @state() private _thermostatAreaId = "";
+  @state() private _nudgeDeltaC = 1.2;
+  @state() private _maxNudgeHeadroomC = 2.5;
+  @state() private _fallbackHeatC = 16.5;
+  @state() private _fallbackCoolC = 26.5;
+  @state() private _minDeadbandC = 1.7;
+  @state() private _circulateFanMode = "on";
+  @state() private _idleFanMode = "auto";
+  @state() private _minRunMinutes = 10;
+  @state() private _minOffMinutes = 5;
+  @state() private _minFanMinutes = 10;
+  @state() private _changeoverMinutes = 30;
+  @state() private _followThermostatSetpoint = true;
+  @state() private _thermostatOverrideHours = 2;
+  @state() private _exteriorOpenPolicy: ExteriorOpenPolicy = "pause_unless_door_closed";
+  @state() private _humidityComfortEnabled = true;
+  @state() private _dehumidifyRhThreshold = 60;
+  @state() private _maxDehumidifyOvercoolC = 0.8;
+  @state() private _wetCoilLockoutMinutes = 25;
+  @state() private _wetCoilMaxRh = 52;
+  @state() private _priceShiftModes: PriceShiftModes = "cool_only";
   @state() private _moldDetectionEnabled = false;
   @state() private _moldHumidityThreshold = 70;
   @state() private _moldFRsi = 0.8;
@@ -228,13 +224,6 @@ export class RsSettings extends LitElement {
   @state() private _moldPreventionEnabled = false;
   @state() private _moldPreventionIntensity: "light" | "medium" | "strong" = "medium";
   @state() private _moldPreventionNotify = false;
-  @state() private _compressorGroups: CompressorGroup[] = [];
-  @state() private _coilDryEnabled = false;
-  @state() private _coilDryMinutes = 20;
-  @state() private _coilDryMode: "fan_only" | "dry" = "fan_only";
-  @state() private _coilDryFanMode = "low";
-  @state() private _coilDryMinCoolingMinutes = 10;
-  @state() private _coilDryDrainMinutes = 0;
   @state() private _loaded = false;
   // A failed load must not render the forms: the next full-payload save would write defaults.
   @state() private _loadFailed = false;
@@ -490,6 +479,7 @@ export class RsSettings extends LitElement {
           .hass=${this.hass}
           .priceEntity=${this._priceEntity}
           .status=${this.priceStatus}
+          .priceShiftModes=${this._priceShiftModes}
           @setting-changed=${this._onSettingChanged}
         ></rs-settings-price>`;
       case "control":
@@ -520,31 +510,32 @@ export class RsSettings extends LitElement {
           .vacationUntil=${this._vacationUntil}
           @setting-changed=${this._onSettingChanged}
         ></rs-settings-vacation>`;
-      case "valve":
-        return html`<rs-settings-valve
+      case "plant":
+        return html`<rs-settings-plant
           .hass=${this.hass}
-          .valveProtectionEnabled=${this._valveProtectionEnabled}
-          .valveProtectionInterval=${this._valveProtectionInterval}
+          .thermostatEntity=${this._thermostatEntity}
+          .thermostatAreaId=${this._thermostatAreaId}
+          .nudgeDeltaC=${this._nudgeDeltaC}
+          .maxNudgeHeadroomC=${this._maxNudgeHeadroomC}
+          .fallbackHeatC=${this._fallbackHeatC}
+          .fallbackCoolC=${this._fallbackCoolC}
+          .minDeadbandC=${this._minDeadbandC}
+          .circulateFanMode=${this._circulateFanMode}
+          .idleFanMode=${this._idleFanMode}
+          .minRunMinutes=${this._minRunMinutes}
+          .minOffMinutes=${this._minOffMinutes}
+          .minFanMinutes=${this._minFanMinutes}
+          .changeoverMinutes=${this._changeoverMinutes}
+          .followThermostatSetpoint=${this._followThermostatSetpoint}
+          .thermostatOverrideHours=${this._thermostatOverrideHours}
+          .exteriorOpenPolicy=${this._exteriorOpenPolicy}
+          .humidityComfortEnabled=${this._humidityComfortEnabled}
+          .dehumidifyRhThreshold=${this._dehumidifyRhThreshold}
+          .maxDehumidifyOvercoolC=${this._maxDehumidifyOvercoolC}
+          .wetCoilLockoutMinutes=${this._wetCoilLockoutMinutes}
+          .wetCoilMaxRh=${this._wetCoilMaxRh}
           @setting-changed=${this._onSettingChanged}
-        ></rs-settings-valve>`;
-      case "compressor":
-        return html`<rs-settings-compressor
-          .hass=${this.hass}
-          .compressorGroups=${this._compressorGroups}
-          @setting-changed=${this._onSettingChanged}
-        ></rs-settings-compressor>`;
-      case "coil_dry":
-        return html`<rs-settings-coil-dry
-          .hass=${this.hass}
-          .coilDryEnabled=${this._coilDryEnabled}
-          .coilDryMinutes=${this._coilDryMinutes}
-          .coilDryMode=${this._coilDryMode}
-          .coilDryFanMode=${this._coilDryFanMode}
-          .coilDryMinCoolingMinutes=${this._coilDryMinCoolingMinutes}
-          .coilDryDrainMinutes=${this._coilDryDrainMinutes}
-          .availableFanModes=${this._availableAcFanModes()}
-          @setting-changed=${this._onSettingChanged}
-        ></rs-settings-coil-dry>`;
+        ></rs-settings-plant>`;
       case "mold":
         return html`<rs-settings-mold
           .hass=${this.hass}
@@ -604,8 +595,7 @@ export class RsSettings extends LitElement {
           return { text: localize("settings.summary.general_off", l), on: false };
         }
         const n = Object.values(this.rooms).filter(
-          (r) =>
-            (r.devices?.length ?? 0) > 0 && !r.is_outdoor && r.climate_control_enabled !== false,
+          (r) => !!r.temperature_sensor && !r.is_outdoor && r.climate_control_enabled !== false,
         ).length;
         return {
           text: localize(
@@ -739,41 +729,22 @@ export class RsSettings extends LitElement {
         }
         return parts.length ? { text: parts.join(" · "), on: true } : { text: off, on: false };
       }
-      case "valve":
-        return this._valveProtectionEnabled
-          ? {
-              text: localize("settings.summary.valve_on", l, {
-                days: count(this._valveProtectionInterval),
-              }),
-              on: true,
-            }
-          : { text: off, on: false };
-      case "compressor": {
-        const groups = this._compressorGroups.length;
-        if (!groups) return { text: localize("settings.summary.compressor_none", l) };
-        const devices = this._compressorGroups.reduce((n, g) => n + g.members.length, 0);
+      case "plant": {
+        if (!this._thermostatEntity) {
+          return { text: localize("settings.summary.plant_none", l), on: false };
+        }
+        const name =
+          (this.hass.states[this._thermostatEntity]?.attributes?.friendly_name as string) ||
+          this._thermostatEntity;
         return {
-          text: [
-            localize(groups === 1 ? "settings.summary.groups_one" : "settings.summary.groups", l, {
-              count: count(groups),
-            }),
-            localize(
-              devices === 1 ? "settings.summary.devices_one" : "settings.summary.devices",
-              l,
-              { count: count(devices) },
-            ),
-          ].join(" · "),
+          text: localize("settings.summary.plant_on", l, {
+            name,
+            heat: `${formatTempLocale(this._fallbackHeatC, this.hass, 0, 1)}\u00a0${tempUnit(this.hass)}`,
+            cool: `${formatTempLocale(this._fallbackCoolC, this.hass, 0, 1)}\u00a0${tempUnit(this.hass)}`,
+          }),
+          on: true,
         };
       }
-      case "coil_dry":
-        return this._coilDryEnabled
-          ? {
-              text: localize("settings.summary.coil_dry_on", l, {
-                time: formatMinutes(this._coilDryMinutes, l),
-              }),
-              on: true,
-            }
-          : { text: off, on: false };
       case "notifications": {
         if (!this._moldNotificationsEnabled) return { text: off, on: false };
         // Only mold detection and the prevention notice send anything from this page
@@ -836,26 +807,6 @@ export class RsSettings extends LitElement {
     this._autoSave();
   }
 
-  /**
-   * Union of fan_modes across every configured AC entity, in the order the devices list them.
-   *
-   * The global setting has no single device to read fan_modes from, so show
-   * the speeds the user's actual hardware reports instead of a guessed list.
-   */
-  private _availableAcFanModes(): FanModeOption[] {
-    const modes = new Map<string, string>();
-    for (const room of Object.values(this.rooms ?? {})) {
-      for (const dev of room.devices ?? []) {
-        if (dev.type !== "ac") continue;
-        const st = this.hass?.states?.[dev.entity_id];
-        for (const fm of (st?.attributes?.fan_modes ?? []) as string[]) {
-          if (!modes.has(fm)) modes.set(fm, fanModeLabel(this.hass, fm, st));
-        }
-      }
-    }
-    return [...modes].map(([value, label]) => ({ value, label }));
-  }
-
   private _autoSave() {
     if (this._saveDebounce) clearTimeout(this._saveDebounce);
     this._saveDebounce = setTimeout(() => {
@@ -868,8 +819,6 @@ export class RsSettings extends LitElement {
     const sent = new Map(this._dirty);
     if (!sent.size) return;
     const values = this._fields();
-    const groups = values.compressorGroups as CompressorGroup[];
-    compressorDrafts = groups.filter((g) => compressorGroupProblem(g, groups) !== null);
     const changes: Record<string, unknown> = {};
     for (const [key, sync] of SETTINGS) {
       if (sync.fields.some((f) => sent.has(f))) changes[key] = sync.write(values);

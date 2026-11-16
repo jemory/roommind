@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 from homeassistant.core import Context
 
 DOMAIN = "roommind"
-VERSION = "2.0.0"
+VERSION = "3.0.0"
 
 # Platforms
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BINARY_SENSOR, Platform.CLIMATE]
@@ -40,13 +40,6 @@ MODE_COOLING = "cooling"
 CONTROL_MODE_MPC = "mpc"
 CONTROL_MODE_BANGBANG = "bangbang"
 DEFAULT_CONTROL_MODE = CONTROL_MODE_MPC
-
-# Schedule states
-SCHEDULE_STATE_ON = "on"
-
-# Defaults
-DEFAULT_COMFORT_TEMP = 21.0
-DEFAULT_ECO_TEMP = 17.0
 
 # Split heat/cool defaults
 DEFAULT_COMFORT_HEAT = 21.0
@@ -101,45 +94,13 @@ class TargetTemps(NamedTuple):
 MIN_TARGET_TEMP = 5.0
 MAX_TARGET_TEMP = 35.0
 
-# Smart control defaults
+# Cold-start bang-bang fallback and the plant's outdoor temperature gates.
 BANGBANG_HEAT_HYSTERESIS = 0.2  # °C below target → start heating (bang-bang fallback)
 BANGBANG_COOL_HYSTERESIS = 0.2  # °C above target → start cooling (bang-bang fallback)
 DEFAULT_OUTDOOR_COOLING_MIN = 16  # Hard block: NEVER cool if outdoor < this
 DEFAULT_OUTDOOR_HEATING_MAX = 22  # Don't heat if outdoor > this
-HEATING_BOOST_TARGET = 30  # Fallback TRV heating boost (used when entity max_temp unavailable)
-AC_HEATING_BOOST_TARGET = 30  # Fallback AC heating boost (used when entity max_temp unavailable)
-AC_COOLING_BOOST_TARGET = 16  # Fallback AC cooling boost (used when entity min_temp unavailable)
-MIN_POWER_FRACTION = 0.15  # Minimum non-zero power fraction (prevents TRV dead zone)
-DEFAULT_COMFORT_WEIGHT = 70  # Default comfort_weight slider value
-APPROACH_RATE_MIN = 0.2  # Gentlest gap fraction closed per block, at comfort_weight=0 (full efficiency)
-AC_BOOST_DELTA_MIN = 3.0  # Tightest AC setpoint cap (°C above/below target) at comfort_weight=0
-AC_BOOST_DELTA_MAX = 50.0  # Comfort-end AC cap (°C); finite value above any real device range so the cap never binds (inf would break the linear slider interpolation)
-PROPORTIONAL_DEADBAND_C = 0.5  # Minimum proportional setpoint change (°C) to resend, in the gentle regime
-PROPORTIONAL_DEADBAND_NEAR_TARGET_C = 0.2  # Finer proportional deadband (°C) within 1°C of target
-PROPORTIONAL_SETPOINT_DWELL_SECONDS = 300  # Minimum time a proportional setpoint stays on the device before a recomputed one replaces it (one MPC block, #317)
-PROPORTIONAL_SETPOINT_REPORT_SECONDS = (
-    60  # A device still showing another setpoint this long after a send dropped it; sent again once within the dwell
-)
-PROPORTIONAL_SETPOINT_REPORT_TOLERANCE = (
-    0.5  # K a shown setpoint may differ from the sent one (device rounding) before it counts as dropped
-)
-BOOST_CAP_FALLBACK_STEP = 0.5  # Distance kept below a device's max_temp for proportional heating setpoints when it reports no target_temp_step (#396)
-# Direct valve control (#413): TRVs whose valve opening RoomMind sets through number entities
-VALVE_DWELL_SECONDS = 600  # Minimum time a valve position stays before a small correction moves the motor again
-VALVE_DEADBAND_PCT = 5  # Smaller position changes are not sent
-VALVE_OVERSHOOT_STOP_K = 0.5  # A modulating valve closes this far above the target whatever the model says
-VALVE_PROPORTIONAL_BAND_K = 1.0  # A modulating valve opens 100 % further per this many K below the target
-# AC sensor offset (device reading - room sensor while the compressor runs), see HeadOffsetTracker
-HEAD_OFFSET_SETTLE_S = 240  # Running time before readings count: the offset builds up with the airflow after a start
-HEAD_OFFSET_ALPHA = 0.05  # EMA weight per reading (one per 30 s cycle: ~10 min of running to follow a change)
-HEAD_OFFSET_MIN_SAMPLES = 10  # Readings before the offset is applied to setpoints
-HEAD_OFFSET_MAX_K = 4.0  # Larger differences are a misplaced or broken sensor, not a bias to correct
-HEAD_OFFSET_GRID_K = 0.5  # Applied offsets are multiples of this; below a quarter of a degree nothing changes
-HEAD_OFFSET_HYSTERESIS_K = 0.375  # The applied offset moves only once the learned one is this far from it
-# Comfort-weighted cost (°C² equivalent) of starting a run, for slow heating systems (UFH) only.
-# Fast systems get a start hysteresis in the controller; UFH keeps the optimizer's decisions
-# and toggled heat/idle every 30 s cycle at the target without it (#429).
-SLOW_SYSTEM_START_PENALTY = 1.0
+# Default comfort/efficiency slider value; the joint MPC weighs comfort against energy with it.
+DEFAULT_COMFORT_WEIGHT = 70
 
 # Update interval in seconds
 UPDATE_INTERVAL = 30
@@ -161,14 +122,6 @@ EKF_UPDATE_MIN_DT = 3.0  # minutes — matches HISTORY_WRITE_CYCLES
 OUTDOOR_UNAVAILABLE_NOTIFY_CYCLES = 60
 OUTDOOR_UNAVAILABLE_NOTIFICATION_ID = "roommind_outdoor_unavailable"
 
-# Prediction clamping: max °C change in one prediction step (prevents unrealistic jumps)
-MAX_PREDICTION_DELTA = 3.0
-
-# Valve protection (anti-seize): periodic cycling of idle TRV valves
-VALVE_PROTECTION_CHECK_CYCLES = 120  # ~1 hour — how often to scan for stale valves
-VALVE_PROTECTION_CYCLE_DURATION = 15  # seconds — minimum before closing (actual ≥ UPDATE_INTERVAL)
-DEFAULT_VALVE_PROTECTION_INTERVAL = 7  # days — default idle threshold before cycling
-
 # Mold risk detection & prevention
 MOLD_RISK_OK = "ok"
 MOLD_RISK_WARNING = "warning"
@@ -184,78 +137,6 @@ MOLD_HYSTERESIS = 5.0  # surface RH must drop this much below warning to clear
 MOLD_PREVENTION_RELEASE_MINUTES = 30
 DEFAULT_MOLD_F_RSI = 0.80  # DIN 4108-2 temperature factor; realistic for standard existing buildings
 
-# Heating system profiles — residual heat modeling per system type
-# tau_minutes: exponential decay time constant of residual heat after heating stops
-# initial_fraction: fraction of beta_h at t=0 (fully charged thermal mass)
-# tau_charge_minutes: time constant for thermal mass to charge (how long heating must run)
-# min_run_minutes: minimum heating run time for the MPC optimizer
-HEATING_SYSTEM_PROFILES: dict[str, dict[str, float]] = {
-    "radiator": {
-        "tau_minutes": 10.0,
-        "initial_fraction": 0.3,
-        "tau_charge_minutes": 15.0,
-        "min_run_minutes": 10.0,
-    },
-    "underfloor": {
-        "tau_minutes": 90.0,
-        "initial_fraction": 0.85,
-        "tau_charge_minutes": 60.0,
-        "min_run_minutes": 30.0,
-    },
-}
-RESIDUAL_HEAT_CUTOFF = 0.02  # below this q_residual is treated as zero
-# Only radiator rooms learn their residual heat and stop a run early on it; underfloor
-# keeps its own pre-heat synthesis (mpc_optimizer) with the fixed profile.
-HEATING_SYSTEM_RADIATOR = "radiator"
-
-# Learned residual heat: after each heating run the room is watched for
-# RESIDUAL_LEARN_WINDOW_MINUTES; the rise beyond the model's idle drift, divided by
-# the rise the profile predicts, is one sample of the room's residual scale
-# (multiplier on the profile's initial_fraction). A run that restarts earlier still
-# counts after RESIDUAL_LEARN_MIN_MINUTES. The window is longer than a radiator's
-# profile tau on purpose: the scale then matches the total stored heat, which is
-# what decides the overshoot, even when the real radiator cools slower than tau.
-# The cap is far above the profile's own scale: real rooms (a 7-day HA history, short
-# runs on TRVs with boosted setpoints) released 8-25x the profile's heat after a stop,
-# mostly because the heating rate learned during a short run trails the radiator.
-RESIDUAL_LEARN_WINDOW_MINUTES = 60.0
-# Largest sensor reporting step the plan bridges after a radiator stop (AfterglowReading)
-AFTERGLOW_READING_MAX_STEP_K = 0.5
-RESIDUAL_LEARN_MIN_MINUTES = 15.0
-RESIDUAL_LEARN_MIN_EXPECTED_K = 0.03  # profile-predicted rise below this carries no signal
-RESIDUAL_SCALE_MIN = 0.0
-RESIDUAL_SCALE_MAX = 15.0
-RESIDUAL_SCALE_EMA_ALPHA = 0.2
-# The profile (scale 1) counts as this many earlier samples: a sample moves the scale by
-# 1 / (weight + n + 1) until that reaches the EMA alpha, so one run disturbed by something
-# the model does not know cannot set the scale on its own (one sample reached the cap of
-# 15 in a real room).
-RESIDUAL_SCALE_PRIOR_WEIGHT = 2.0
-
-# Learned decay time of a radiator room's afterglow. The profile's 10 min is a guess; in
-# real rooms the sensor kept rising for 40-60 min after a stop (radiator and room air
-# release the heat slowly), while a valve that shuts hard showed a short bump. After each
-# full observation window the measured rise is fitted against these decay times (same
-# total heat), and the best one is one sample. Weighed like the scale (prior: the profile).
-RESIDUAL_TAU_GRID = (5.0, 7.5, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0)
-RESIDUAL_TAU_MIN = 5.0
-RESIDUAL_TAU_MAX = 60.0
-RESIDUAL_TAU_MIN_RISE_K = 0.3  # the shape of a smaller rise is lost in the sensor's 0.1-0.2 K steps
-# Radiator decisions look this many decay times past the min run, so the overshoot a
-# stored-heat afterglow causes 30-60 min after a stop is inside what the plan weighs.
-# At the profile's 10 min this gives the base lookahead (6 blocks).
-RADIATOR_LOOKAHEAD_TAUS = 2.0
-# A radiator room whose learned afterglow of one regular min run lifts the room more than
-# this runs for a single block instead: the stored heat of a 10-min run overshot heavy
-# radiators by ~0.5 K even at the lowest power (the TRV opens fully once its head sits below
-# a boosted setpoint), so holding the target needs a smaller quantum.
-RADIATOR_SHORT_RUN_AFTERGLOW_K = 0.5
-
-# AC rebound: while an AC cools, the air drops below the building mass; after it
-# stops the air relaxes back within minutes. Charge relaxes towards the cooling
-# power fraction while cooling and decays with this time constant otherwise.
-AC_REBOUND_TAU_MINUTES = 10.0
-AC_REBOUND_CUTOFF = 0.01  # below this the rebound charge is treated as zero
 
 # Blind/cover control
 COVER_SOLAR_MIN: float = 0.15
@@ -284,54 +165,6 @@ COVER_DAILY_LOOKAHEAD_H: float = 8.0  # hours ahead to search for daily solar pe
 COVER_SMOOTHING_MINUTES: float = 30.0  # EMA time constant for room temp and shading excess (AC cycles)
 COVER_SMOOTHING_RISE_MINUTES: float = 10.0  # faster EMA while the shading excess climbs
 
-# Heat source orchestration — smart routing for rooms with multiple heating device types
-DEFAULT_HEAT_SOURCE_PRIMARY_DELTA = 1.5  # °C gap to engage primary (boiler/radiator)
-DEFAULT_HEAT_SOURCE_OUTDOOR_THRESHOLD = 5.0  # °C outdoor: above = prefer AC, below = prefer boiler
-DEFAULT_HEAT_SOURCE_AC_MIN_OUTDOOR = -15.0  # °C hard-disable AC heating below this
-HEAT_SOURCE_HYSTERESIS = 0.3  # °C hysteresis band to prevent oscillation
-HEAT_SOURCE_LARGE_GAP_MULTIPLIER = 2.0  # activate both sources when gap > primary_delta * this
-HEAT_SOURCE_SECONDARY_POWER_SCALE = 0.7  # throttle secondary when both active (prevent overshoot)
-
-# Compressor group defaults
-DEFAULT_COMPRESSOR_MIN_RUN_MINUTES = 15
-DEFAULT_COMPRESSOR_MIN_OFF_MINUTES = 5
-# Devices without usable state (IR blasters) get an unchanged command once more after this long.
-# Long enough that it is not audible as a beep pattern (#416), short enough to heal a lost frame,
-# a change on the remote or a restarted device within one comfortable stretch.
-COMMAND_CACHE_REASSERT_SECONDS = 1800
-# Setpoint changed on the device itself (#259): after RoomMind switches a device's mode, the device may
-# restore a setpoint it stored for that mode. A setpoint change reported up to DEVICE_SETPOINT_MODE_REPORT_SECONDS
-# after the device showed the new mode, within DEVICE_SETPOINT_SETTLE_SECONDS of the switch (cloud integrations
-# report minutes later), is that restore.
-DEVICE_SETPOINT_SETTLE_SECONDS = 300
-DEVICE_SETPOINT_MODE_REPORT_SECONDS = 60
-# A setpoint RoomMind sent this recently is its own echo when the device reports it late (sleepy TRVs).
-DEVICE_SETPOINT_ECHO_SECONDS = 900
-# A device reading older than this (room resting, processing skipped) says nothing about a change since.
-DEVICE_SETPOINT_GAP_SECONDS = 300
-# A resolved target that moved by more than this since the last active command is a deliberate change (°C)
-COMPRESSOR_HOLD_RETARGET_TOLERANCE = 0.05
-# Compressor hold: a heating unit keeps its boost until the room is this far above the heating target
-# (and at least at the cooling target), the cooling side mirrored. With single-point targets (heat == cool)
-# the margin keeps "target reached" from ending the hold; 0.5 K is a typical sensor/setpoint resolution.
-HOLD_OVERSHOOT_MARGIN = 0.5
-COMPRESSOR_STATE_SETTLE_SECONDS = (
-    120  # An "off" reading this soon after our own start is state lag, not a manual switch-off
-)
-
-# Compressor group master device — conflict resolution strategies
-CONFLICT_RESOLUTION_HEATING_PRIORITY = "heating_priority"
-CONFLICT_RESOLUTION_COOLING_PRIORITY = "cooling_priority"
-CONFLICT_RESOLUTION_MAJORITY = "majority"
-CONFLICT_RESOLUTION_OUTDOOR_TEMP = "outdoor_temp"
-CONFLICT_RESOLUTIONS = [
-    CONFLICT_RESOLUTION_HEATING_PRIORITY,
-    CONFLICT_RESOLUTION_COOLING_PRIORITY,
-    CONFLICT_RESOLUTION_MAJORITY,
-    CONFLICT_RESOLUTION_OUTDOOR_TEMP,
-]
-DEFAULT_CONFLICT_RESOLUTION = CONFLICT_RESOLUTION_HEATING_PRIORITY
-
 
 # Far-future sentinel: vacation active indefinitely (year 2999)
 VACATION_SENTINEL_UNTIL = 32503680000.0
@@ -352,6 +185,147 @@ def is_override_suppressed(room: dict, settings: dict, presence_away: bool) -> b
     if room.get("ignore_presence", False):
         return False
     return bool(settings.get("presence_clears_override", False))
+
+
+# ---------------------------------------------------------------------------
+# Central HVAC adaptation
+# ---------------------------------------------------------------------------
+# RoomMind v2 drives one shared forced-air plant through a single Central
+# Thermostat. Rooms contribute targets, openings and priorities; they no longer
+# own devices. The per-device constants above stay for the legacy modules that
+# are still imported during the migration waves.
+MODE_CIRCULATING = "circulating"
+# Every action the joint whole-home optimizer can choose for the plant.
+PLANT_MODES = [MODE_IDLE, MODE_HEATING, MODE_COOLING, MODE_CIRCULATING]
+TARGET_REASON_PLANT_OVERRIDE = "plant_override"
+
+# How a room's occupancy drives its target resolution and Room Priority.
+OCCUPANCY_MODE_REACTIVE_TREND = "reactive_and_trend"
+OCCUPANCY_MODE_SCHEDULE_ASSUMED = "schedule_assumed_when_on"
+OCCUPANCY_MODE_FOLLOW_SCHEDULE = "follow_schedule"
+OCCUPANCY_MODE_GUARDRAIL_ONLY = "guardrail_only"
+OCCUPANCY_MODES = [
+    OCCUPANCY_MODE_REACTIVE_TREND,
+    OCCUPANCY_MODE_SCHEDULE_ASSUMED,
+    OCCUPANCY_MODE_FOLLOW_SCHEDULE,
+    OCCUPANCY_MODE_GUARDRAIL_ONLY,
+]
+# How long a room must stay empty before it counts as unoccupied: shorter dwell
+# lets one doorway crossing drop a room to its guardrail band.
+DEFAULT_OCCUPANCY_DWELL_MINUTES = 3.0
+
+# What the whole plant does while an Exterior Opening reports open.
+EXTERIOR_OPEN_PAUSE_UNLESS_DOOR_CLOSED = "pause_unless_door_closed"
+EXTERIOR_OPEN_PAUSE_ALWAYS = "pause_always"
+EXTERIOR_OPEN_EXCLUDE_ROOM_ONLY = "exclude_room_only"
+EXTERIOR_OPEN_POLICIES = [
+    EXTERIOR_OPEN_PAUSE_UNLESS_DOOR_CLOSED,
+    EXTERIOR_OPEN_PAUSE_ALWAYS,
+    EXTERIOR_OPEN_EXCLUDE_ROOM_ONLY,
+]
+
+# Which targets the electricity-price shift may widen.
+PRICE_SHIFT_COOL_ONLY = "cool_only"
+PRICE_SHIFT_BOTH = "both"
+PRICE_SHIFT_MODES = [PRICE_SHIFT_COOL_ONLY, PRICE_SHIFT_BOTH]
+
+# Interior doors cut a room off from the return path: the supply still heats or
+# cools it, but the room no longer mixes with the House Reference Temperature.
+DEFAULT_INTERIOR_DOOR_DELAY_S = 60
+DEFAULT_DOOR_CLOSED_MIX_FACTOR = 0.40
+DOOR_CLOSED_SUPPLY_FACTOR = 0.75
+# Air-vs-mass relaxation of the forced-air rebound after a plant run stops.
+FORCED_AIR_REBOUND_TAU_MINUTES = 10.0
+FORCED_AIR_REBOUND_CUTOFF = 0.01
+
+# Central Thermostat actuation: the setpoint nudge sits just past the
+# thermostat's own reading rather than at a remote room's target.
+DEFAULT_NUDGE_DELTA_C = 1.2
+DEFAULT_MAX_NUDGE_HEADROOM_C = 2.5
+# Safe band parked on the thermostat while the plant is idle or circulating so
+# it protects the home without Home Assistant.
+DEFAULT_FALLBACK_HEAT_C = 16.5
+DEFAULT_FALLBACK_COOL_C = 26.5
+DEFAULT_MIN_DEADBAND_C = 1.7
+DEFAULT_CIRCULATE_FAN_MODE = "on"
+DEFAULT_PLANT_IDLE_FAN_MODE = "auto"
+# Equipment protection: short-cycling guards for the compressor, the blower and
+# the heat/cool changeover.
+DEFAULT_MIN_RUN_MINUTES = 10
+DEFAULT_MIN_OFF_MINUTES = 5
+DEFAULT_MIN_FAN_MINUTES = 10
+DEFAULT_CHANGEOVER_MINUTES = 30
+# An override on the Central Thermostat itself keeps plant priority this long.
+DEFAULT_THERMOSTAT_OVERRIDE_HOURS = 2.0
+# Dehumidification may over-cool slightly; a wet coil locks Circulation out
+# until it has drained to avoid raising indoor humidity.
+DEFAULT_DEHUMIDIFY_RH_THRESHOLD = 60.0
+DEFAULT_MAX_DEHUMIDIFY_OVERCOOL_C = 0.8
+DEFAULT_WET_COIL_LOCKOUT_MINUTES = 25
+DEFAULT_WET_COIL_MAX_RH = 52.0
+# Room Priority weights: an active override outranks occupancy, occupancy
+# outranks the guardrail band that keeps empty rooms from drifting.
+OVERRIDE_PRIORITY_WEIGHT = 3.0
+AWAY_PRIORITY_WEIGHT = 0.25
+GUARDRAIL_PRIORITY_WEIGHT = 0.08
+# Never let the plant idle below this: freeze protection outranks energy.
+FREEZE_PROTECTION_TEMP_C = 7.0
+# Share of a conditioning run's energy that the blower alone accounts for.
+FAN_ENERGY_FRACTION = 0.08
+
+DEFAULT_CENTRAL_PLANT_SETTINGS: dict[str, object] = {
+    "thermostat_entity": "",
+    "thermostat_area_id": "",
+    "nudge_delta_c": DEFAULT_NUDGE_DELTA_C,
+    "max_nudge_headroom_c": DEFAULT_MAX_NUDGE_HEADROOM_C,
+    "fallback_heat_c": DEFAULT_FALLBACK_HEAT_C,
+    "fallback_cool_c": DEFAULT_FALLBACK_COOL_C,
+    "min_deadband_c": DEFAULT_MIN_DEADBAND_C,
+    "circulate_fan_mode": DEFAULT_CIRCULATE_FAN_MODE,
+    "idle_fan_mode": DEFAULT_PLANT_IDLE_FAN_MODE,
+    "min_run_minutes": DEFAULT_MIN_RUN_MINUTES,
+    "min_off_minutes": DEFAULT_MIN_OFF_MINUTES,
+    "min_fan_minutes": DEFAULT_MIN_FAN_MINUTES,
+    "changeover_minutes": DEFAULT_CHANGEOVER_MINUTES,
+    "follow_thermostat_setpoint": True,
+    "thermostat_override_hours": DEFAULT_THERMOSTAT_OVERRIDE_HOURS,
+    "exterior_open_policy": EXTERIOR_OPEN_PAUSE_UNLESS_DOOR_CLOSED,
+    "humidity_comfort_enabled": True,
+    "dehumidify_rh_threshold": DEFAULT_DEHUMIDIFY_RH_THRESHOLD,
+    "max_dehumidify_overcool_c": DEFAULT_MAX_DEHUMIDIFY_OVERCOOL_C,
+    "wet_coil_lockout_minutes": DEFAULT_WET_COIL_LOCKOUT_MINUTES,
+    "wet_coil_max_rh": DEFAULT_WET_COIL_MAX_RH,
+    "price_shift_modes": PRICE_SHIFT_COOL_ONLY,
+}
+
+
+def get_central_plant_settings(settings: dict) -> dict:
+    """Return the central plant settings with every unspecified key defaulted.
+
+    Always a fresh dict: callers may mutate the result without touching either
+    the global settings or the module-level defaults.
+    """
+    merged = dict(DEFAULT_CENTRAL_PLANT_SETTINGS)
+    central = settings.get("central_plant")
+    if isinstance(central, dict):
+        merged.update(central)
+    return merged
+
+
+def is_plant_override_active(settings: dict) -> bool:
+    """Return True when a manual override on the Central Thermostat is active.
+
+    Accepts either the full global settings dict or an already resolved central
+    plant settings dict, so callers need not unwrap ``central_plant`` first.
+    """
+    central = settings.get("central_plant")
+    sources = [settings, central] if isinstance(central, dict) else [settings]
+    for source in sources:
+        if source.get("plant_override_heat") is None and source.get("plant_override_cool") is None:
+            continue
+        override_until = source.get("plant_override_until")
+        return override_until is None or time.time() < override_until
+    return False
 
 
 def build_override_live(room: dict, suppressed: bool = False) -> dict:

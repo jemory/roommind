@@ -308,6 +308,9 @@ export function buildChartSeries(
   const deviceTargetData: Array<[number, number]> = [];
   const humidityData: Array<[number, number]> = [];
   const co2Data: Array<[number, number]> = [];
+  // Central HVAC: the house reference temperature and the humidity-corrected room temperature
+  const houseData: Array<[number, number]> = [];
+  const effectiveData: Array<[number, number]> = [];
   const bandBaseData: Array<[number, number | null]> = [];
   const bandData: Array<[number, number | null]> = [];
   // Outside the judged sides: too cold below the heat side, too warm above the cool side
@@ -345,6 +348,8 @@ export function buildChartSeries(
     if (!isOutdoor && p.device_setpoint != null) deviceTargetData.push([ts, d(p.device_setpoint)]);
     if (p.humidity != null) humidityData.push([ts, p.humidity]);
     if (p.co2 != null) co2Data.push([ts, p.co2]);
+    if (!isOutdoor && p.house_temp != null) houseData.push([ts, d(p.house_temp)]);
+    if (!isOutdoor && p.effective_temp != null) effectiveData.push([ts, d(p.effective_temp)]);
     if (targetBand && !isOutdoor) pushBand(p);
   }
 
@@ -485,6 +490,34 @@ export function buildChartSeries(
     });
   }
 
+  if (houseData.length > 0) {
+    series.push({
+      id: "house_temp",
+      type: "line",
+      name: localize("analytics.house_temp", l),
+      color: colors.neutral,
+      data: houseData,
+      showSymbol: false,
+      smooth: true,
+      lineStyle: { width: 1.5, type: "dashed", opacity: 0.7 },
+      yAxisIndex: 0,
+    });
+  }
+
+  if (effectiveData.length > 0) {
+    series.push({
+      id: "effective_temp",
+      type: "line",
+      name: localize("analytics.effective_temp", l),
+      color: colors.temp,
+      data: effectiveData,
+      showSymbol: false,
+      smooth: true,
+      lineStyle: { width: 1.5, type: "dotted", opacity: 0.8 },
+      yAxisIndex: 0,
+    });
+  }
+
   if (outdoorData.length > 0) {
     series.push({
       id: "outdoor_temp",
@@ -504,9 +537,11 @@ export function buildChartSeries(
   const heatingBandData = band((p) => p.mode === "heating");
   const coolingBandData = band((p) => p.mode === "cooling");
   const windowBandData = band((p) => p.window_open);
+  const circulatingBandData = band((p) => p.mode === "circulating" || !!p.fan_circulating);
   const hasHeating = hasValue(heatingBandData);
   const hasCooling = hasValue(coolingBandData);
   const hasWindow = hasValue(windowBandData);
+  const hasCirculating = hasValue(circulatingBandData);
 
   if (hasHeating) {
     series.push({
@@ -535,6 +570,23 @@ export function buildChartSeries(
       showSymbol: false,
       lineStyle: { width: 0 },
       areaStyle: { color: colors.cool, opacity: 0.55, origin: "start" },
+      tooltip: { show: false },
+      yAxisIndex: 0,
+      z: -1,
+      connectNulls: false,
+    });
+  }
+
+  if (hasCirculating) {
+    series.push({
+      id: "circulating_events",
+      type: "line",
+      name: localize("analytics.circulating_period", l),
+      color: colors.neutral,
+      data: circulatingBandData,
+      showSymbol: false,
+      lineStyle: { width: 0 },
+      areaStyle: { color: colors.neutral, opacity: 0.18, origin: "start" },
       tooltip: { show: false },
       yAxisIndex: 0,
       z: -1,
@@ -668,6 +720,23 @@ export function buildChartSeries(
   // Open windows and "now" run through every panel; placeOnPanels drops those not shown
   for (const panel of SUB_PANEL_ORDER) {
     if (!series.some((s) => s.panel === panel)) continue;
+    if (hasCirculating) {
+      series.push({
+        id: "circulating_events",
+        type: "line",
+        name: localize("analytics.circulating_period", l),
+        color: colors.neutral,
+        data: circulatingBandData,
+        showSymbol: false,
+        lineStyle: { width: 0 },
+        areaStyle: { color: colors.neutral, opacity: 0.18, origin: "start" },
+        tooltip: { show: false },
+        yAxisIndex: 0,
+        z: -1,
+        connectNulls: false,
+      });
+    }
+
     if (hasWindow) {
       series.push({
         ...series.find((s) => s.id === "window_events"),

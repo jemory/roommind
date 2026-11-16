@@ -4,11 +4,13 @@
     C_mass dTm/dt = H_mo (To - Tm) + H_am (Ta - Tm) + Q_rad
 
 Emitter nodes (radiator water, screed slab) belong to the devices and hand their
-convective/radiant shares to this model.
+convective/radiant shares to this model. A central air handler's return plenum is not a
+node: ``return_plenum_mix`` turns one tick of ducted circulation into per-room gains.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -80,6 +82,42 @@ class Gains:
         self.rad_w += other.rad_w
         self.moisture_kg_s += other.moisture_kg_s
         self.vent_w_k += other.vent_w_k
+
+
+@dataclass
+class MixingFlow:
+    """One room's leg of a central air handler's circulation loop.
+
+    ``mass_kg_s`` is dry air moved out of (and back into) the room, i.e. the room's share
+    of the blower flow after the duct share and the closed-door throttling.
+    """
+
+    area_id: str
+    mass_kg_s: float
+    t_air: float
+    x: float
+
+
+def return_plenum_mix(flows: Iterable[MixingFlow]) -> dict[str, Gains]:
+    """Sensible and latent mixing gains of a recirculating central air handler.
+
+    The return plenum is perfectly mixed: ``T_ret = Σ ṁᵢTᵢ / Σ ṁᵢ`` and the same for the
+    humidity ratio. Each room then gets ``ṁᵢ c_p (T_ret - Tᵢ)`` and ``ṁᵢ (x_ret - xᵢ)``,
+    whose sums are zero by construction: pure fan circulation conserves enthalpy and
+    moisture and only homogenizes the served rooms.
+    """
+    legs = [f for f in flows if f.mass_kg_s > 0]
+    total = sum(f.mass_kg_s for f in legs)
+    if total <= 0:
+        return {}
+    t_ret = sum(f.mass_kg_s * f.t_air for f in legs) / total
+    x_ret = sum(f.mass_kg_s * f.x for f in legs) / total
+    out: dict[str, Gains] = {}
+    for f in legs:
+        g = out.setdefault(f.area_id, Gains())
+        g.conv_w += f.mass_kg_s * CP_AIR * (t_ret - f.t_air)
+        g.moisture_kg_s += f.mass_kg_s * (x_ret - f.x)
+    return out
 
 
 @dataclass

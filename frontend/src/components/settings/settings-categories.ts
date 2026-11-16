@@ -6,6 +6,7 @@ import type { TranslationKey } from "../../utils/localize";
  */
 export type SettingsCategoryId =
   | "orphans"
+  | "plant"
   | "general"
   | "vacation"
   | "presence"
@@ -14,9 +15,6 @@ export type SettingsCategoryId =
   | "price"
   | "learning"
   | "mold"
-  | "valve"
-  | "compressor"
-  | "coil_dry"
   | "notifications"
   | "reset";
 
@@ -48,6 +46,12 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
   {
     label: "settings.group.operation",
     categories: [
+      {
+        id: "plant",
+        icon: "mdi:hvac",
+        title: "plant.title",
+        intro: "settings.intro.plant",
+      },
       {
         id: "general",
         icon: "mdi:power",
@@ -101,24 +105,6 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     label: "settings.group.protection",
     categories: [
       { id: "mold", icon: "mdi:water-alert", title: "mold.title", intro: "settings.intro.mold" },
-      {
-        id: "valve",
-        icon: "mdi:shield-refresh",
-        title: "valve_protection.title",
-        intro: "settings.intro.valve",
-      },
-      {
-        id: "compressor",
-        icon: "mdi:heat-pump-outline",
-        title: "compressor.title",
-        intro: "settings.intro.compressor",
-      },
-      {
-        id: "coil_dry",
-        icon: "mdi:air-filter",
-        title: "coil_dry.title",
-        intro: "settings.intro.coil_dry",
-      },
     ],
   },
   {
@@ -143,7 +129,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
 const BY_ID = new Map(SETTINGS_GROUPS.flatMap((g) => g.categories).map((c) => [c.id, c]));
 
 /** Shown on wide screens when nothing (or something unknown) is selected. */
-export const DEFAULT_SETTINGS_CATEGORY: SettingsCategoryId = "general";
+export const DEFAULT_SETTINGS_CATEGORY: SettingsCategoryId = "plant";
 
 export function getSettingsCategory(id: string): SettingsCategory | undefined {
   return BY_ID.get(id as SettingsCategoryId);

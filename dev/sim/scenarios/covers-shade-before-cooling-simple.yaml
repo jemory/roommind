@@ -1,9 +1,10 @@
 name: covers-shade-before-cooling-simple
 extends: covers-shade-before-cooling-south
 description: >
-  The south room (orientation set) in Simple mode (control_mode bangbang): there is
-  no MPC plan, the cover decision must follow the same solar-load semantics.
-tags: [covers, solar, ac, control-mode]
+  The south room (orientation set) in Simple mode (control_mode bangbang): there is no MPC
+  plan, the Central BangBang controller keeps the house safe and the cover decision must
+  follow the same solar-load semantics.
+tags: [covers, solar, central-plant, control-mode]
 roommind:
   settings:
     control_mode: bangbang

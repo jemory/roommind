@@ -1,0 +1,132 @@
+name: central-wet-coil-humidity-lockout
+description: >
+  Hot, humid July day in a Gulf-coast wood-frame house (subtropical-humid) on one
+  Central Plant running heat-pump cooling. Indoor humidity sits in the high 50s, so the
+  dew point never lets the rooms feel cool at dry-bulb alone. The optimizer has to use
+  Effective Temperature: cool the occupied rooms to their band, and dehumidify no lower
+  than the allowed overcool. After every cooling run the evaporator coil is wet, and
+  running the blower then would re-evaporate that film into the supply air
+  (sim: coil_water_kg, coil_evap_tau_s). Wet-Coil Lockout must keep Circulation off
+  while the coil holds water, so the blower never blows the moisture back on the
+  occupants.
+refs: [1, 3]
+tags: [central-plant, humidity, wet-coil, effective-temperature]
+start: 2026-07-06T00:00
+duration: 2d
+location: {latitude: 29.76, longitude: -95.37, time_zone: America/Chicago, unit_system: us_customary, country: US}
+weather: {profile: subtropical-humid, fixed: {cloud: 45}}
+house:
+  building: us_wood_frame
+  floors: {ground: Ground floor, upper: Upstairs}
+  outdoor:
+    sensors: {temperature: sensor.outdoor_temp, humidity: sensor.outdoor_humidity}
+  rooms:
+    living_room:
+      name: Living room
+      floor: ground
+      floor_area_m2: 40
+      exterior_wall_m2: 24
+      initial: {temperature: 26.0, mass_temperature: 25.5, humidity: 62}
+      windows: [{orientation: S, area_m2: 3, g_value: 0.6}]
+      devices:
+        - {entity_id: climate.central_hvac, profile: central_furnace_hp, cool_capacity_w: 6000, serves_rooms: [office, bedroom], supply_shares: {living_room: 0.5, office: 0.3, bedroom: 0.2}}
+      sensors:
+        temperature: {entity_id: sensor.living_room_temp}
+        humidity: {entity_id: sensor.living_room_humidity}
+        occupancy: {entity_id: binary_sensor.living_room_presence}
+    office:
+      name: Office
+      floor: upper
+      floor_area_m2: 18
+      exterior_wall_m2: 12
+      initial: {temperature: 26.0, mass_temperature: 25.5, humidity: 62}
+      windows: [{orientation: E, area_m2: 2, g_value: 0.6}]
+      sensors:
+        temperature: {entity_id: sensor.office_temp}
+        humidity: {entity_id: sensor.office_humidity}
+        occupancy: {entity_id: binary_sensor.office_presence}
+    bedroom:
+      name: Bedroom
+      floor: upper
+      floor_area_m2: 16
+      exterior_wall_m2: 11
+      initial: {temperature: 25.5, mass_temperature: 25.0, humidity: 62}
+      windows: [{orientation: W, area_m2: 2, g_value: 0.6}]
+      sensors:
+        temperature: {entity_id: sensor.bedroom_temp}
+        humidity: {entity_id: sensor.bedroom_humidity}
+        occupancy: {entity_id: binary_sensor.bedroom_presence}
+people:
+  - id: robin
+    plan:
+      presence: {weekday: ["home@00:00"], weekend: ["home@00:00"]}
+      rooms: {sleeping: "22:00-07:00", office: "09:00-17:00", living: "default"}
+    rooms: {sleeping: bedroom, office: office, living: living_room}
+roommind:
+  settings:
+    outdoor_temp_sensor: sensor.outdoor_temp
+    outdoor_humidity_sensor: sensor.outdoor_humidity
+    weather_entity: weather.simhome
+    central_plant:
+      thermostat_entity: climate.central_hvac
+      nudge_delta_c: 1.5
+      max_nudge_headroom_c: 3.0
+      fallback_heat_c: 17.0
+      fallback_cool_c: 27.5
+      min_deadband_c: 2.5
+      circulate_fan_mode: "on"
+      idle_fan_mode: auto
+      min_run_minutes: 15
+      min_off_minutes: 5
+      min_fan_minutes: 25
+      exterior_open_policy: pause_unless_door_closed
+      humidity_comfort_enabled: true
+      dehumidify_rh_threshold: 58
+      max_dehumidify_overcool_c: 0.8
+      wet_coil_lockout_minutes: 30
+      wet_coil_max_rh: 55
+  rooms:
+    living_room:
+      temperature_sensor: sensor.living_room_temp
+      humidity_sensor: sensor.living_room_humidity
+      occupancy_sensors: [binary_sensor.living_room_presence]
+      climate_mode: cool_only
+      comfort_cool: 23.5
+      eco_cool: 26.5
+      eco_heat: 20.0
+    office:
+      temperature_sensor: sensor.office_temp
+      humidity_sensor: sensor.office_humidity
+      occupancy_sensors: [binary_sensor.office_presence]
+      climate_mode: cool_only
+      comfort_cool: 23.5
+      eco_cool: 26.5
+      eco_heat: 20.0
+    bedroom:
+      temperature_sensor: sensor.bedroom_temp
+      humidity_sensor: sensor.bedroom_humidity
+      occupancy_sensors: [binary_sensor.bedroom_presence]
+      climate_mode: cool_only
+      comfort_cool: 24.0
+      eco_cool: 26.5
+      eco_heat: 20.0
+expect:
+  - {invariant: no_rejected_commands}
+  - {invariant: setpoints_within_device_range}
+  # The plant really ran the heat pump this humid afternoon.
+  - {metric: device.active_h, entity_id: climate.central_hvac, min: 1.0, label: the heat pump cooled the house}
+  # Effective Temperature: dry bulb in band and RH held down instead of blowing moisture
+  # back into the rooms. 23.5 °C at <= 62 % still feels like the comfort band; 26 °C at
+  # 70 % does not.
+  - {check: "world.rooms.living_room.t_air <= 24.5 and world.rooms.living_room.rh < 62", at: "+0d15h", label: effective temperature comfortable in the humid afternoon}
+  - {check: "world.rooms.living_room.t_air <= 24.5 and world.rooms.living_room.rh < 62", at: "+0d20h", label: effective temperature comfortable in the evening}
+  # Never over-cool below the comfort band to chase humidity.
+  - {check: "world.rooms.living_room.t_air >= 21.5", at: "+0d15h", label: dehumidify overcool stays inside the band}
+  # Wet-Coil Lockout: while the evaporator holds water the blower must not circulate
+  # (blowing the film back would raise RH right after the room felt dry).
+  - {check: "dev('climate.central_hvac').coil_water_kg == 0 or dev('climate.central_hvac').fan_mode != 'on'", at: "+0d13h", label: no circulation on a wet coil (early afternoon)}
+  - {check: "dev('climate.central_hvac').coil_water_kg == 0 or dev('climate.central_hvac').fan_mode != 'on'", at: "+0d15h30m", label: no circulation on a wet coil (afternoon)}
+  - {check: "dev('climate.central_hvac').coil_water_kg == 0 or dev('climate.central_hvac').fan_mode != 'on'", at: "+0d18h", label: no circulation on a wet coil (evening)}
+  - {check: "dev('climate.central_hvac').coil_water_kg == 0 or dev('climate.central_hvac').fan_mode != 'on'", at: "+1d14h", label: no circulation on a wet coil (second day)}
+  - {metric: comfort.in_band_pct, room: living_room, min: 85, label: occupied living_room comfortable}
+  - {metric: comfort.in_band_pct, room: office, min: 80, label: occupied office comfortable}

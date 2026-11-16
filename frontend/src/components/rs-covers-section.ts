@@ -23,6 +23,8 @@ export class RsCoverSection extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
   @property({ attribute: false }) public area!: HassArea;
   @property({ attribute: false }) public selectedCovers: Set<string> = new Set();
+  /** Blinds RoomMind only observes (manual covers, numeric position sensors). */
+  @property({ attribute: false }) public readOnlyCovers: Set<string> = new Set();
   @property({ type: Boolean }) public editing = false;
   /** All rooms, to say where else a cover schedule is used. */
   @property({ attribute: false }) public rooms: Record<string, RoomConfig> = {};
@@ -49,6 +51,8 @@ export class RsCoverSection extends LitElement {
   @property({ attribute: false }) public coverMinPositions: Record<string, number> = {};
   /** The entity picker for covers from other areas is open. */
   @state() private _pickerOpen = false;
+  /** The entity picker for read-only covers is open. */
+  @state() private _readOnlyPickerOpen = false;
 
   static styles = [
     tokens,
@@ -117,7 +121,8 @@ export class RsCoverSection extends LitElement {
 
   private _renderView(l: string) {
     const covers = [...this.selectedCovers];
-    if (covers.length === 0) {
+    const readOnly = [...this.readOnlyCovers];
+    if (covers.length === 0 && readOnly.length === 0) {
       return html`<rs-list-row
         clickable
         plain-icon
@@ -145,6 +150,32 @@ export class RsCoverSection extends LitElement {
         );
     }
     return html`
+      ${readOnly.map((eid) => {
+        const st = this.hass.states[eid];
+        const name = (st?.attributes?.friendly_name as string) ?? eid;
+        const pos = st?.attributes?.current_position as number | undefined;
+        const orient = this.coverOrientations[eid];
+        const orientDir =
+          orient !== undefined
+            ? RsCoverSection._DIRECTIONS.find((d) => d.deg === orient)
+            : undefined;
+        return html`<rs-list-row
+          clickable
+          chevron
+          icon="mdi:blinds-horizontal"
+          icon-label=${localize("detail.more_info", l)}
+          .heading=${name}
+          .secondary=${[
+            localize("covers.read_only", l),
+            orientDir ? localize(orientDir.longLabel, l) : "",
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+          .value=${pos !== undefined ? formatPercent(pos, this.hass) : ""}
+          @row-click=${this._fireEdit}
+          @icon-click=${() => openEntityInfo(this, eid)}
+        ></rs-list-row>`;
+      })}
       ${covers.map((eid) => {
         const st = this.hass.states[eid];
         const name = (st?.attributes?.friendly_name as string) ?? eid;
@@ -379,8 +410,171 @@ export class RsCoverSection extends LitElement {
           ${this._renderPicker()}
         </div>
       </section>
-      ${selected.length ? this._renderAutomation(l) : nothing}
+      ${this._renderReadOnlyGroup(l)} ${selected.length ? this._renderAutomation(l) : nothing}
     `;
+  }
+
+  /** Manual blinds and numeric position sensors: observed for shading, never driven. */
+  private _renderReadOnlyGroup(l: string) {
+    const areaIds = getEntitiesForArea(this.area.area_id, this.hass?.entities, this.hass?.devices)
+      .map((e) => e.entity_id)
+      .filter((id) => this._isReadOnlyCandidate(id));
+    const selected = [...this.readOnlyCovers];
+    const suggestions = areaIds.filter((id) => !this.readOnlyCovers.has(id));
+    return html`<section class="group">
+      <h4 class="group-title">
+        <ha-icon icon="mdi:blinds-horizontal" aria-hidden="true"></ha-icon>
+        ${localize("covers.read_only_title", l)}
+        <rs-info-icon .text=${localize("covers.read_only_hint", l)}></rs-info-icon>
+      </h4>
+      <div class="rows">
+        ${selected.map((id) => this._renderReadOnlyCover(id, areaIds.includes(id)))}
+        ${
+          selected.length
+            ? nothing
+            : html`<p class="note">${localize("covers.read_only_none", l)}</p>`
+        }
+        ${suggestions.map(
+          (id) =>
+            html`<rs-list-row
+              clickable
+              plain-icon
+              icon="mdi:plus"
+              .heading=${this._name(id)}
+              .secondary=${localize("detail.devices.add_suggestion", l)}
+              .value=${this._position(id)}
+              @row-click=${() => this._onReadOnlyToggle(id, true)}
+            ></rs-list-row>`,
+        )}
+        ${this._renderReadOnlyPicker()}
+      </div>
+    </section>`;
+  }
+
+  private _isReadOnlyCandidate(id: string): boolean {
+    if (id.startsWith("cover.roommind_")) return false;
+    if (this.selectedCovers.has(id) || this.readOnlyCovers.has(id)) return false;
+    return id.startsWith("cover.") || id.startsWith("sensor.");
+  }
+
+  private _renderReadOnlyCover(entityId: string, inArea: boolean) {
+    const l = this.hass.language;
+    const name = this._name(entityId);
+    const orientation = this.coverOrientations[entityId];
+    return html`<div class="cover">
+      <rs-list-row
+        single-line
+        icon="mdi:blinds-horizontal"
+        icon-label=${localize("detail.more_info", l)}
+        .heading=${name}
+        .secondary=${[entityId, inArea ? "" : localize("devices.other_area", l)]
+          .filter(Boolean)
+          .join(" · ")}
+        .value=${this._position(entityId)}
+        @icon-click=${() => openEntityInfo(this, entityId)}
+      >
+        <rs-icon-button
+          slot="end"
+          size="sm"
+          icon="mdi:close"
+          .label=${localize("common.remove_named", l, { name })}
+          @click=${() => this._onReadOnlyToggle(entityId, false)}
+        ></rs-icon-button>
+      </rs-list-row>
+      <div class="pair">
+        <rs-field .info=${localize("covers.orientation_hint", l)}>
+          <ha-select
+            .label=${localize("covers.orientation_group_title", l)}
+            .value=${orientation !== undefined ? String(orientation) : ANY_DIRECTION}
+            .options=${[
+              { value: ANY_DIRECTION, label: localize("covers.orientation_none", l) },
+              ...RsCoverSection._DIRECTIONS.map((d) => ({
+                value: String(d.deg),
+                label: localize(d.longLabel, l),
+              })),
+            ]}
+            fixedMenuPosition
+            @selected=${(e: Event) => {
+              const val = getSelectValue(e);
+              const next = val === ANY_DIRECTION || val === "" ? undefined : Number(val);
+              if (next !== orientation) this._setOrientation(entityId, next);
+            }}
+            @closed=${(e: Event) => e.stopPropagation()}
+          >
+            <ha-list-item value=${ANY_DIRECTION}
+              >${localize("covers.orientation_none", l)}</ha-list-item
+            >
+            ${RsCoverSection._DIRECTIONS.map(
+              (d) =>
+                html`<ha-list-item value=${String(d.deg)}
+                  >${localize(d.longLabel, l)}</ha-list-item
+                >`,
+            )}
+          </ha-select>
+        </rs-field>
+      </div>
+    </div>`;
+  }
+
+  private _renderReadOnlyPicker() {
+    const l = this.hass.language;
+    const label = localize(this.readOnlyCovers.size ? "sensors.choose_other" : "sensors.choose", l);
+    if (!this._readOnlyPickerOpen) {
+      return html`<rs-list-row
+        clickable
+        plain-icon
+        variant="primary"
+        icon="mdi:magnify"
+        .heading=${label}
+        @row-click=${() => {
+          this._readOnlyPickerOpen = true;
+          void this.updateComplete.then(() => {
+            const picker = this.renderRoot.querySelector<HTMLElement & { open?: () => void }>(
+              "ha-entity-picker",
+            );
+            if (typeof picker?.open === "function") picker.open();
+            else picker?.focus();
+          });
+        }}
+      ></rs-list-row>`;
+    }
+    return html`<div class="picker">
+      <ha-entity-picker
+        .hass=${this.hass}
+        .includeDomains=${["cover", "sensor"]}
+        .entityFilter=${(e: { entity_id: string }) => this._isReadOnlyCandidate(e.entity_id)}
+        .value=${""}
+        .label=${label}
+        @value-changed=${this._onReadOnlyPicked}
+      ></ha-entity-picker>
+      <rs-icon-button
+        size="sm"
+        icon="mdi:close"
+        .label=${localize("common.close", l)}
+        @click=${() => {
+          this._readOnlyPickerOpen = false;
+        }}
+      ></rs-icon-button>
+    </div>`;
+  }
+
+  private _onReadOnlyPicked(ev: CustomEvent) {
+    ev.stopPropagation();
+    const eid = ev.detail.value as string;
+    if (!eid) return;
+    (ev.target as HTMLElement & { value: string }).value = "";
+    this._readOnlyPickerOpen = false;
+    this._onReadOnlyToggle(eid, true);
+  }
+
+  private _onReadOnlyToggle(eid: string, checked: boolean) {
+    this.dispatchEvent(
+      new CustomEvent("read-only-covers-toggle", {
+        detail: { entityId: eid, checked },
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   private _renderAutomation(l: string) {

@@ -113,22 +113,19 @@ def test_name_falls_back_to_area_name(setup):
 
 
 @pytest.mark.parametrize(
-    ("devices", "climate_mode", "acs_heat", "expected"),
+    ("devices", "climate_mode"),
     [
-        ([TRV], "heat_only", False, [HVACMode.OFF, HVACMode.HEAT]),
-        ([AC], "cool_only", False, [HVACMode.OFF, HVACMode.COOL]),
-        ([AC], "auto", True, [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.HEAT_COOL]),
-        ([TRV, AC], "auto", False, [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.HEAT_COOL]),
-        ([TRV], "auto", False, [HVACMode.OFF, HVACMode.HEAT, HVACMode.HEAT_COOL]),
-        ([], "heat_only", False, [HVACMode.OFF, HVACMode.HEAT]),
+        ([TRV], "heat_only"),
+        ([AC], "cool_only"),
+        ([TRV, AC], "auto"),
+        ([], "heat_only"),  # the plant serves the room even without a device of its own
     ],
 )
-def test_hvac_modes_follow_devices(setup, devices, climate_mode, acs_heat, expected):
-    """Modes the devices can serve, plus the room's current mode."""
+def test_hvac_modes_cover_both_sides_for_every_room(setup, devices, climate_mode):
+    """The Central Plant offers furnace heating and heat-pump cooling to every room."""
     make, *_ = setup
     entity = make(_room(devices=devices, climate_mode=climate_mode))
-    with patch("custom_components.roommind.climate.check_acs_can_heat", return_value=acs_heat):
-        assert entity.hvac_modes == expected
+    assert entity.hvac_modes == [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.HEAT_COOL]
 
 
 def test_outdoor_room_is_display_only(setup):
@@ -161,6 +158,7 @@ def test_hvac_mode_off_when_room_control_disabled(setup):
     [
         (_live(mode="heating"), HVACAction.HEATING),
         (_live(mode="cooling"), HVACAction.COOLING),
+        (_live(mode="circulating"), HVACAction.FAN),
         (_live(mode="idle"), HVACAction.IDLE),
         (_live(mode="heating", force_off=True), HVACAction.OFF),
         ({}, None),
@@ -263,8 +261,41 @@ def test_extra_attributes(setup):
         "occupancy_vacant": False,
         "vacation": True,
         "price_level": None,
+        "effective_temperature": None,
+        "priority_weight": 0.0,
+        "occupancy_probability": 0.0,
+        "interior_door_open": False,
+        "exterior_window_open": False,
     }
     assert entity.current_humidity == 55.0
+
+
+def test_extra_attributes_report_the_central_plant_room_state(setup):
+    """Effective Temperature, Room Priority and door/window state are shown on the entity."""
+    make, *_ = setup
+    entity = make(
+        live=_live(
+            effective_temp=21.5,
+            priority_weight=0.92,
+            occupancy_probability=0.75,
+            interior_door_open=True,
+            exterior_window_open=True,
+        )
+    )
+    attrs = entity.extra_state_attributes
+    assert attrs["effective_temperature"] == 21.5  # Celsius installation: shown as stored
+    assert attrs["priority_weight"] == 0.92
+    assert attrs["occupancy_probability"] == 0.75
+    assert attrs["interior_door_open"] is True
+    assert attrs["exterior_window_open"] is True
+
+
+def test_effective_temperature_follows_the_display_unit(setup):
+    """A Fahrenheit installation reads the Effective Temperature in °F."""
+    make, coordinator, *_ = setup
+    coordinator.hass.config.units.temperature_unit = UnitOfTemperature.FAHRENHEIT
+    entity = make(live=_live(effective_temp=20.0))
+    assert entity.extra_state_attributes["effective_temperature"] == pytest.approx(68.0, abs=0.01)
 
 
 @pytest.mark.asyncio
@@ -473,11 +504,11 @@ async def test_set_temperature_with_hvac_mode_switches_mode_first(setup):
 
 @pytest.mark.asyncio
 async def test_set_temperature_rejects_hvac_mode_the_room_cannot_do(setup):
-    """A TRV-only room must not become cool_only through set_temperature's hvac_mode."""
+    """An outdoor area is display-only: set_temperature must not switch it on."""
     make, _, store, _ = setup
-    entity = make(_room(devices=[TRV], climate_mode="heat_only"))
+    entity = make(_room(is_outdoor=True))
     with pytest.raises(ServiceValidationError):
-        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 22.0, "hvac_mode": HVACMode.COOL})
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 22.0, "hvac_mode": HVACMode.HEAT})
     store.async_update_room.assert_not_awaited()
 
 

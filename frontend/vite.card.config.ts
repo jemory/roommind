@@ -1,5 +1,5 @@
 import { defineConfig, type Plugin } from "vite";
-import { resolve } from "path";
+import { resolve } from "node:path";
 
 // The card is loaded on every dashboard page; ship only the strings it uses.
 const CARD_KEY_PREFIXES = [
@@ -34,7 +34,7 @@ export default defineConfig({
   plugins: [cardLocales()],
   build: {
     lib: {
-      entry: resolve(__dirname, "src/card.ts"),
+      entry: resolve(import.meta.dirname, "src/card.ts"),
       name: "RoomMindCard",
       formats: ["iife"],
       fileName: () => "roommind-card.js",

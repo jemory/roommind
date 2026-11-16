@@ -1,24 +1,30 @@
-"""The simulated house: zones, devices, sensors, windows, covers, people, weather.
+"""The simulated house: zones, devices, sensors, windows, doors, covers, people, weather.
 
 Pure Python. ``simhome`` (the HA integration) calls ``step()`` on a timer, mirrors the
 changed entities into HA and routes service calls to ``device_call``/``cover_call``.
+
+Two couplings cross room boundaries: the conductance between neighbouring rooms, which an
+interior door makes dynamic (``open_door`` / ``closed_door`` of the thermal profile), and a
+central air handler's blower, which mixes the return plenum and pushes each served room
+toward the mixed air (``return_plenum_mix``). A shut interior door throttles both.
 """
 
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from .covers import SimCover
 from .devices import DeviceEnv, SimDevice, create_device
-from .devices.base import CommandResult
+from .devices.base import CommandResult, DuctState
 from .devices.models import Boiler
 from .people import MOISTURE_KG_S, SENSIBLE_W, SimPerson
+from .physics.psychro import AIR_DENSITY
 from .physics.solar import window_gain_w
-from .physics.zone import Gains, Zone, ZoneParams
-from .scenario.model import Scenario, WindowSpec
+from .physics.zone import Gains, MixingFlow, Zone, ZoneParams, return_plenum_mix
+from .scenario.model import InteriorDoorSpec, Scenario, WindowSpec
 from .sensors import SimOccupancy, SimSensor
 from .weather import Outdoor, WeatherModel
 
@@ -52,6 +58,15 @@ class WorldError(ValueError):
     """Invalid world action (unknown entity, wrong arguments)."""
 
 
+# Underscore spellings of the dotted actions, so scenarios may say ``open_door``.
+_ACTION_ALIASES = {
+    "open_window": "window.open",
+    "close_window": "window.close",
+    "open_door": "door.open",
+    "close_door": "door.close",
+}
+
+
 @dataclass
 class SimWindow:
     spec: WindowSpec
@@ -62,6 +77,41 @@ class SimWindow:
         if not self.open:
             return 0.0
         return self.spec.area_m2 * open_w_k_per_m2 * (1 + 0.03 * abs(dt_k))
+
+
+@dataclass
+class SimDoor:
+    """An interior door between two rooms: ``on`` = open, like a real door contact."""
+
+    spec: InteriorDoorSpec
+    open: bool = True
+
+    @property
+    def entity_id(self) -> str:
+        return self.spec.sensor
+
+
+@dataclass
+class NeighborLink:
+    """Heat flow between two rooms.
+
+    Without doors it is the static ``neighbors`` coupling of the scenario. A door makes it
+    dynamic: ``open_h`` (``open_door`` of the thermal profile, 60 W/K) while at least one of
+    its doors stands open, ``closed_h`` (``closed_door``, 15 W/K) while all are shut.
+    """
+
+    a: str
+    b: str
+    open_h: float
+    closed_h: float
+    doors: list[SimDoor] = field(default_factory=list)
+
+    @property
+    def is_open(self) -> bool:
+        return not self.doors or any(d.open for d in self.doors)
+
+    def conductance(self) -> float:
+        return self.open_h if self.is_open else self.closed_h
 
 
 class World:
@@ -85,7 +135,10 @@ class World:
         self.window_sensors: dict[str, SimWindow] = {}
         self.covers: dict[str, SimCover] = {}
         self.people: dict[str, SimPerson] = {}
-        self.neighbors: list[tuple[str, str, float]] = []
+        self.doors: dict[str, SimDoor] = {}  # binary_sensor entity -> door
+        self.room_doors: dict[str, list[SimDoor]] = {}  # doors a room declares (its own way out)
+        self.neighbors: list[NeighborLink] = []
+        self.closed_rooms: frozenset[str] = frozenset()  # rooms behind shut interior doors
         self.pending: list[dict[str, Any]] = []  # scheduled reverts, persisted
         self.occupancy_force: dict[str, tuple[int, float | None]] = {}
         self.moisture_events: list[tuple[str, float, float]] = []  # (room, until, kg/s)
@@ -106,6 +159,7 @@ class World:
 
     def _build(self) -> None:
         scn = self.scn
+        pending_links: list[tuple[str, str, float]] = []  # rooms are only all known afterwards
         for area_id, room in scn.rooms.items():
             params = ZoneParams.from_thermal(room.thermal, sum(w.area_m2 for w in room.windows))
             zone = Zone(area_id, params)
@@ -131,16 +185,68 @@ class World:
                     self.sensors[s.entity_id] = SimSensor(s, scn.seed)
             for c in room.covers:
                 self.covers[c.entity_id] = SimCover(c)
+            # A room declares the doors that shut *it* off; the neighbour keeps its own list.
+            self.room_doors[area_id] = []
+            for door in room.interior_doors:
+                sim = SimDoor(door, door.open)
+                self.doors[door.sensor] = sim
+                self.room_doors[area_id].append(sim)
             coupling = room.thermal.get("coupling_w_k") or {}
             for other, kind in room.neighbors.items():
                 value = float(kind) if isinstance(kind, int | float) else float(coupling.get(kind, 15.0))
-                self.neighbors.append((area_id, other, value))
+                pending_links.append((area_id, str(other), value))
+        for a, b, value in pending_links:
+            self._link(a, b, open_h=value, closed_h=value)
+        for area_id in self.zones:
+            self.room_doors.setdefault(area_id, [])
+        self._link_doors()
+        self.closed_rooms = self._closed_rooms()
         for s in scn.outdoor_sensors:
             self.sensors[s.entity_id] = SimSensor(s, scn.seed)
         for p in scn.people:
             self.people[p.id] = SimPerson(p, p.rooms, self.tz)
         for dev in self.devices.values():
             dev.sensor_c = round(self.zones[dev.room].t_air, 1)
+
+    def _link(self, a: str, b: str, open_h: float, closed_h: float) -> NeighborLink | None:
+        """Add (or find) the coupling between two rooms; ignores unknown rooms and self-links."""
+        if a == b or a not in self.zones or b not in self.zones:
+            return None
+        for link in self.neighbors:
+            if {link.a, link.b} == {a, b}:
+                return link
+        link = NeighborLink(a=a, b=b, open_h=open_h, closed_h=closed_h)
+        self.neighbors.append(link)
+        return link
+
+    def _link_doors(self) -> None:
+        """Attach every interior door to its pair and give the coupling door dynamics.
+
+        A door overrides the declared coupling of that pair: open it is ``open_door`` of
+        the thermal profile, shut it is ``closed_door``. A pair that declares no
+        ``neighbors`` entry at all gets the link from the door itself.
+        """
+        for door in self.doors.values():
+            a, b = door.spec.room, door.spec.neighbor
+            if a not in self.zones or b not in self.zones:
+                continue
+            coupling = self.scn.rooms[a].thermal.get("coupling_w_k") or {}
+            open_h = float(coupling.get("open_door", 60.0))
+            closed_h = float(coupling.get("closed_door", 15.0))
+            link = self._link(a, b, open_h=open_h, closed_h=closed_h)
+            if link is None:
+                continue
+            link.open_h, link.closed_h = open_h, closed_h
+            link.doors.append(door)
+
+    def _closed_rooms(self) -> frozenset[str]:
+        """Rooms shut off from the rest of the house: every door they declare is closed.
+
+        Only the room that declares a door counts as closed by it, so closing an office
+        door throttles the office's supply and return air and not the living room's. A
+        room without doors is never closed.
+        """
+        return frozenset(a for a, doors in self.room_doors.items() if doors and not any(d.open for d in doors))
 
     def ha_started(self, now: float) -> None:
         """Called on every HA (re)start; device/sensor start-up quirks count from here."""
@@ -172,9 +278,11 @@ class World:
             if cover.step(dt):
                 changed.add(cover.entity_id)
 
+        self.closed_rooms = self._closed_rooms()
         gains = {area: Gains() for area in self.zones}
         boilers = [d for d in self.devices.values() if isinstance(d, Boiler)]
         loads = {b.entity_id: 0.0 for b in boilers}
+        blowers: list[DuctState] = []
         for dev in self.devices.values():
             if isinstance(dev, Boiler):
                 continue
@@ -182,17 +290,36 @@ class World:
             server = next((b for b in boilers if b.serves(dev.entity_id)), None)
             if server is not None and dev.model in ("trv", "ufh"):
                 supply = server.supply_temp(self.zones[dev.room].t_air)
-            env = DeviceEnv(now=now, zone=self.zones[dev.room], outdoor=out, zones=self.zones, supply_temp_c=supply)
+            env = DeviceEnv(
+                now=now,
+                zone=self.zones[dev.room],
+                outdoor=out,
+                zones=self.zones,
+                supply_temp_c=supply,
+                closed_rooms=self.closed_rooms,
+            )
             for area, g in dev.step(dt, env).items():
                 if area in gains:
                     gains[area].add(g)
+            duct = dev.duct_state()
+            if duct is not None:
+                blowers.append(duct)
             if server is not None:
                 loads[server.entity_id] += getattr(dev, "water_draw_w", 0.0)
             changed.add(dev.entity_id)
             changed.update(dev.spec.valve_numbers().values())
         for b in boilers:
             b.load_w = loads[b.entity_id]
-            b.step(dt, DeviceEnv(now=now, zone=self.zones[b.room], outdoor=out, zones=self.zones))
+            b.step(
+                dt,
+                DeviceEnv(
+                    now=now,
+                    zone=self.zones[b.room],
+                    outdoor=out,
+                    zones=self.zones,
+                    closed_rooms=self.closed_rooms,
+                ),
+            )
             changed.add(b.entity_id)
 
         for area, zone in self.zones.items():
@@ -208,11 +335,17 @@ class World:
                 g.vent_w_k += w.vent_w_k(zone.params.window_open_w_k_per_m2, zone.t_air - out.temp_c)
             self._solar_cache[area] = solar
         self.moisture_events = [e for e in self.moisture_events if now < e[1]]
+        for duct in blowers:
+            # A running blower pushes every served room toward the mixed return air; the
+            # crossing terms sum to zero, so circulation alone moves no enthalpy or water.
+            for area, g in self._mixing_gains(duct).items():
+                gains[area].add(g)
         flows = dict.fromkeys(self.zones, 0.0)
-        for a, b, h in self.neighbors:
-            q = h * (self.zones[b].t_air - self.zones[a].t_air)
-            flows[a] += q
-            flows[b] -= q
+        for link in self.neighbors:
+            h = link.conductance()
+            q = h * (self.zones[link.b].t_air - self.zones[link.a].t_air)
+            flows[link.a] += q
+            flows[link.b] -= q
         x_out = out.x
         for area, zone in self.zones.items():
             zone.step(dt, out.temp_c, x_out, gains[area], flows[area])
@@ -231,6 +364,31 @@ class World:
                     changed.add(s.entity_id)
         self.occupants = occupants
         return changed
+
+    def _mixing_gains(self, duct: DuctState) -> dict[str, Gains]:
+        """Per-room gains of one air handler's circulation loop this tick.
+
+        ``m_dot`` of a room is the blower flow (``circulation_ach`` of the served volume)
+        times its duct share, throttled to ``door_closed_return_factor`` while its
+        interior door is shut: a closed door also blocks the return path.
+        """
+        rooms = [r for r in duct.rooms if r in self.zones]
+        if len(rooms) < 2:
+            return {}  # a single room would only mix with itself
+        served_volume = sum(self.zones[r].params.volume_m3 for r in rooms)
+        total = duct.circulation_ach * served_volume * AIR_DENSITY / 3600.0
+        legs: list[MixingFlow] = []
+        for area in rooms:
+            share = duct.shares.get(area, 0.0)
+            if share <= 0:
+                continue
+            m_dot = total * share
+            if area in self.closed_rooms:
+                m_dot *= duct.door_closed_return_factor
+            if m_dot > 0:
+                zone = self.zones[area]
+                legs.append(MixingFlow(area_id=area, mass_kg_s=m_dot, t_air=zone.t_air, x=zone.x))
+        return return_plenum_mix(legs)
 
     def _solar_w(self, area: str, out: Outdoor) -> float:
         total = 0.0
@@ -290,6 +448,8 @@ class World:
             return self.occupancy[entity_id].available(now)
         if entity_id in self.window_sensors:
             return now >= self.window_sensors[entity_id].unavailable_until
+        if entity_id in self.doors:
+            return True  # a door contact is always there
         if entity_id in self.covers:
             return self.covers[entity_id].available
         return True
@@ -299,6 +459,12 @@ class World:
     WORLD_ACTIONS = (
         "window.open",
         "window.close",
+        "open_window",
+        "close_window",
+        "door.open",
+        "door.close",
+        "open_door",
+        "close_door",
         "person.leave",
         "person.arrive",
         "occupancy.set",
@@ -317,12 +483,22 @@ class World:
         duration = args.get("for")
         until = now + float(duration) if duration else None
         eid = args.get("entity_id")
+        action = _ACTION_ALIASES.get(action, action)
         if action in ("window.open", "window.close"):
             window = self._window(eid)
             window.open = action == "window.open"
             if until:
                 self._schedule(until, "window.close" if window.open else "window.open", {"entity_id": eid})
             return {eid}
+        if action in ("door.open", "door.close"):
+            door = self._door(eid, args)
+            door.open = action == "door.open"
+            self.closed_rooms = self._closed_rooms()
+            if until is None and args.get("duration"):
+                until = now + float(args["duration"])  # same hold time under its other name
+            if until:
+                self._schedule(until, "door.close" if door.open else "door.open", {"entity_id": door.entity_id})
+            return {door.entity_id}
         if action in ("person.leave", "person.arrive"):
             person = self.people.get(args["person"])
             if person is None:
@@ -391,6 +567,37 @@ class World:
             raise WorldError(f"unknown window sensor {eid!r}")
         return self.window_sensors[eid]
 
+    def _door(self, eid: str | None, args: dict[str, Any]) -> SimDoor:
+        """Resolve a door action by ``entity_id`` or by ``room`` (+ optional ``neighbor``).
+
+        A door declared *on* a room is preferred, because that is the room the door shuts
+        off; a door merely pointing at the room from its neighbour still matches when it is
+        the only candidate.
+        """
+        if eid:
+            door = self.doors.get(eid)
+            if door is None:
+                raise WorldError(f"unknown interior door {eid!r}")
+            return door
+        room = args.get("room")
+        if not room:
+            raise WorldError("a door action needs room or entity_id")
+        if room not in self.zones:
+            raise WorldError(f"unknown room {room!r}")
+        candidates = [d for d in self.doors.values() if room in (d.spec.room, d.spec.neighbor)]
+        if args.get("neighbor"):
+            candidates = [d for d in candidates if args["neighbor"] in (d.spec.room, d.spec.neighbor)]
+        owned = [d for d in candidates if d.spec.room == room]
+        if len(owned) == 1:
+            return owned[0]
+        candidates = owned or candidates
+        if not candidates:
+            raise WorldError(f"no interior door for room {room!r}")
+        if len(candidates) > 1:
+            listed = ", ".join(sorted(d.entity_id for d in candidates))
+            raise WorldError(f"room {room!r} has several interior doors ({listed}); pass entity_id")
+        return candidates[0]
+
     def _set_available(self, eid: str | None, available: bool, until: float | None) -> None:
         inf = float("inf")
         if eid in self.devices:
@@ -456,8 +663,12 @@ class World:
                     "solar_w": round(self._solar_cache.get(a, 0.0)),
                     "occupants": self.occupants.get(a, 0),
                     "windows_open": sum(w.open for w in self.windows[a]),
+                    "door_closed": a in self.closed_rooms,
                 }
                 for a, z in self.zones.items()
+            },
+            "doors": {
+                e: {"open": d.open, "room": d.spec.room, "neighbor": d.spec.neighbor} for e, d in self.doors.items()
             },
             "devices": {
                 e: {
@@ -479,6 +690,7 @@ class World:
                     ),
                     **({"t_slab": round(d.t_slab, 2)} if getattr(d, "t_slab", None) is not None else {}),
                     **({"t_rad": round(d.t_rad, 2)} if getattr(d, "t_rad", None) is not None else {}),
+                    **({"coil_water_kg": round(d.coil_water_kg, 4)} if hasattr(d, "coil_water_kg") else {}),
                 }
                 for e, d in self.devices.items()
             },
@@ -501,6 +713,7 @@ class World:
             "windows": {
                 e: {"open": w.open, "unavailable_until": w.unavailable_until} for e, w in self.window_sensors.items()
             },
+            "doors": {e: {"open": d.open} for e, d in self.doors.items()},
             "covers": {e: c.snapshot() for e, c in self.covers.items()},
             "people": {p: s.snapshot() for p, s in self.people.items()},
             "pending": self.pending,
@@ -529,6 +742,10 @@ class World:
             if e in self.window_sensors:
                 self.window_sensors[e].open = ws["open"]
                 self.window_sensors[e].unavailable_until = ws.get("unavailable_until", 0.0)
+        for e, ds in data.get("doors", {}).items():
+            if e in self.doors:
+                self.doors[e].open = ds["open"]
+        self.closed_rooms = self._closed_rooms()
         self.pending = data.get("pending", [])
         self.occupancy_force = {k: (v[0], v[1]) for k, v in data.get("occupancy_force", {}).items()}
         self.moisture_events = [tuple(e) for e in data.get("moisture_events", [])]  # type: ignore[misc]

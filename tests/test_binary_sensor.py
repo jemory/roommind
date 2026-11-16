@@ -8,6 +8,7 @@ import pytest
 
 from custom_components.roommind.binary_sensor import (
     RoomMindCoverPausedSensor,
+    RoomMindWetCoilLockoutBinarySensor,
     _create_room_binary_sensors,
     async_setup_entry,
 )
@@ -94,19 +95,18 @@ async def test_async_setup_entry_creates_entities_for_rooms_with_covers():
 
     # Callback stored on coordinator
     assert coordinator.async_add_binary_sensor_entities is async_add_entities
-    # Only living_room has covers, so one entity created
+    # The global Wet Coil sensor plus the cover sensor of the one room that has covers
     async_add_entities.assert_called_once()
     entities = async_add_entities.call_args[0][0]
-    assert len(entities) == 1
-    assert isinstance(entities[0], RoomMindCoverPausedSensor)
+    assert [type(e) for e in entities] == [RoomMindWetCoilLockoutBinarySensor, RoomMindCoverPausedSensor]
     # Area tracked
     assert "living_room" in coordinator._binary_sensor_entity_areas
     assert "bedroom" not in coordinator._binary_sensor_entity_areas
 
 
 @pytest.mark.asyncio
-async def test_async_setup_entry_no_covers_no_entities():
-    """async_setup_entry does not call async_add_entities when no rooms have covers."""
+async def test_async_setup_entry_no_covers_still_creates_the_wet_coil_sensor():
+    """The plant-wide Wet Coil sensor exists even without any room cover."""
     coordinator = MagicMock()
     coordinator._binary_sensor_entity_areas = set()
 
@@ -123,7 +123,8 @@ async def test_async_setup_entry_no_covers_no_entities():
 
     await async_setup_entry(hass, entry, async_add_entities)
 
-    async_add_entities.assert_not_called()
+    async_add_entities.assert_called_once()
+    assert [type(e) for e in async_add_entities.call_args[0][0]] == [RoomMindWetCoilLockoutBinarySensor]
 
 
 def _aq_coordinator(live, room=None):
@@ -184,5 +185,51 @@ async def test_async_setup_entry_creates_the_air_quality_sensor_next_to_the_cove
     add = MagicMock()
     await async_setup_entry(hass, entry, add)
     entities = add.call_args[0][0]
-    assert [type(e) for e in entities] == [RoomMindCoverPausedSensor, RoomMindAirQualitySensor]
+    assert [type(e) for e in entities] == [
+        RoomMindWetCoilLockoutBinarySensor,
+        RoomMindCoverPausedSensor,
+        RoomMindAirQualitySensor,
+    ]
     assert coordinator._air_quality_entity_areas == {"living_room"}
+
+
+# ---------------------------------------------------------------------------
+# Wet Coil Circulation Lockout (global Central Plant sensor)
+# ---------------------------------------------------------------------------
+
+
+def _plant_coordinator(plant):
+    coordinator = MagicMock()
+    coordinator.data = {"rooms": {}, "central_plant": plant}
+    return coordinator
+
+
+def test_wet_coil_lockout_ids_and_defaults():
+    """One enabled-by-default global binary sensor with the water-off icon."""
+    sensor = RoomMindWetCoilLockoutBinarySensor(_plant_coordinator({}))
+    assert sensor.unique_id == "roommind_wet_coil_lockout"
+    assert sensor.entity_id == "binary_sensor.roommind_wet_coil_lockout"
+    # The display name comes from entity.binary_sensor.wet_coil_lockout, so the entity
+    # stays translatable instead of pinning an English name in the code.
+    assert sensor.translation_key == "wet_coil_lockout"
+    assert sensor.icon == "mdi:water-off"
+    assert sensor.entity_registry_enabled_default is True
+    assert sensor.is_on is False
+    assert sensor.extra_state_attributes == {"wet_coil_charge": None}
+
+
+def test_wet_coil_lockout_reads_the_plant():
+    sensor = RoomMindWetCoilLockoutBinarySensor(_plant_coordinator({"wet_coil_locked": True, "wet_coil_charge": 0.4}))
+    assert sensor.is_on is True
+    assert sensor.extra_state_attributes == {"wet_coil_charge": 0.4}
+
+
+def test_wet_coil_lockout_before_the_first_cycle():
+    """No coordinator data (or a malformed block) reads as unlocked."""
+    coordinator = MagicMock()
+    coordinator.data = None
+    sensor = RoomMindWetCoilLockoutBinarySensor(coordinator)
+    assert sensor.is_on is False
+
+    coordinator.data = {"central_plant": "not-a-dict"}
+    assert sensor.is_on is False

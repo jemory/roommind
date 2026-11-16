@@ -3,15 +3,7 @@ import { property, state } from "lit/decorators.js";
 import type { ClimateMode, HomeAssistant, OverrideType, RoomConfig } from "../types";
 import { localize, uiLanguage, type TranslationKey } from "../utils/localize";
 import { errorText } from "../utils/errors";
-import { deviceAbilities, modeFits } from "../utils/device-utils";
-import {
-  getModeClass,
-  hintText,
-  roomKind,
-  roomStateInfo,
-  scheduleNextChange,
-  setbackHint,
-} from "../utils/room-state";
+import { getModeClass, roomKind, roomStateInfo, scheduleNextChange } from "../utils/room-state";
 import { formatHours, formatMinutes, formatPercent, formatRemaining } from "../utils/format";
 import { modeStyles } from "../styles/shared-mode-styles";
 import { tokens } from "../styles/tokens";
@@ -239,7 +231,7 @@ export class RoomMindRoomCard extends LitElement {
     const room = this._room;
     const kind = room ? roomKind(room, 0) : "empty";
     if (room && (kind === "outdoor" || kind === "sensor")) return this._renderMonitorOnly(room);
-    if (!room || (room.devices?.length ?? 0) === 0) {
+    if (!room || !room.temperature_sensor) {
       return this._renderMessage(localize("roomcard.unknown_room", this._lang), "", true);
     }
     const live = room.live;
@@ -351,7 +343,13 @@ export class RoomMindRoomCard extends LitElement {
         )
       : null;
     const cls =
-      st?.tone === "heat" ? "mode-heating" : st?.tone === "cool" ? "mode-cooling" : "mode-idle";
+      st?.tone === "heat"
+        ? "mode-heating"
+        : st?.tone === "cool"
+          ? "mode-cooling"
+          : st?.tone === "circulating"
+            ? "mode-circulating"
+            : "mode-idle";
     return html`
       <div class="header">
         ${this._renderName(room.area_id, room)}
@@ -382,7 +380,6 @@ export class RoomMindRoomCard extends LitElement {
     const unit = tempUnit(this.hass);
     const fmt = (c: number) => formatTempLocale(c, this.hass, 0, 1);
     const paused = !this._optimisticOverride && !!live.override_suppressed;
-    const setback = setbackHint(live, l);
     let remaining = "";
     if (paused) {
       remaining = localize("roomcard.paused", l);
@@ -435,16 +432,6 @@ export class RoomMindRoomCard extends LitElement {
                     role="img"
                     title=${localize("card.presence_away", l)}
                     aria-label=${localize("card.presence_away", l)}
-                  ></ha-icon>`
-                : nothing
-            }
-            ${
-              setback
-                ? html`<ha-icon
-                    icon=${setback.icon}
-                    role="img"
-                    title=${hintText(setback, l)}
-                    aria-label=${hintText(setback, l)}
                   ></ha-icon>`
                 : nothing
             }
@@ -594,12 +581,8 @@ export class RoomMindRoomCard extends LitElement {
           : nothing
       }
     </div>`;
-    // Same rule as the room page: only what the devices can do, a stored mode stays visible
-    const devices = room.devices ?? [];
-    const ability = deviceAbilities(devices, this.hass);
-    const offered = CLIMATE_MODES.filter(
-      (m) => m.value === current || modeFits(m.value, devices, ability),
-    );
+    // The Central Plant can heat and cool, so every climate mode is offered.
+    const offered = CLIMATE_MODES;
     const segments = showModes
       ? html`<div class="segments">
           ${offered.map(
@@ -935,6 +918,10 @@ export class RoomMindRoomCard extends LitElement {
 
       .accent.mode-cooling {
         background: var(--rs-cool);
+      }
+
+      .accent.mode-circulating {
+        background: var(--rs-ok);
       }
 
       .accent.mode-idle,

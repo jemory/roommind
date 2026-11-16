@@ -8,8 +8,8 @@ description: >
 refs: [238]
 duration: 1d
 timeline:
-  - {at: "+0d09h50m", do: entity.remove, entity_id: schedule.plan_wohnen}
-  - {at: "+0d10h", do: ha.service, service: climate.set_temperature, data: {entity_id: climate.roommind_wohnzimmer, temperature: 22.5}}
+  - {at: "+0d09h50m", do: entity.remove, entity_id: schedule.plan_living}
+  - {at: "+0d10h", do: ha.service, service: climate.set_temperature, data: {entity_id: climate.roommind_living_room, temperature: 22.5}}
 expect:
-  - {check: "room.wohnzimmer.override_active == true and room.wohnzimmer.heat_target == 22.5", at: "+0d13h50m", label: set temperature holds while the schedule is unreadable}
-  - {check: "room.wohnzimmer.override_active == false", at: "+0d14h05m", label: hold ends after 4 h instead of never}
+  - {check: "room.living_room.override_active == true and room.living_room.heat_target == 22.5", at: "+0d13h50m", label: set temperature holds while the schedule is unreadable}
+  - {check: "room.living_room.override_active == false", at: "+0d14h05m", label: hold ends after 4 h instead of never}

@@ -13,23 +13,18 @@ from homeassistant.util import dt as dt_util
 from ..const import (
     CLIMATE_MODE_COOL_ONLY,
     CLIMATE_MODE_HEAT_ONLY,
+    CONTROL_MODE_BANGBANG,
     DEFAULT_COMFORT_COOL,
     DEFAULT_COMFORT_HEAT,
+    DEFAULT_CONTROL_MODE,
     DEFAULT_ECO_COOL,
     DEFAULT_ECO_HEAT,
     DEFAULT_OUTDOOR_COOLING_MIN,
     DEFAULT_OUTDOOR_HEATING_MAX,
-    HEATING_SYSTEM_RADIATOR,
     MODE_IDLE,
     is_override_active,
 )
-from ..control.mpc_controller import (
-    DEFAULT_OUTDOOR_TEMP_FALLBACK,
-    check_acs_can_heat,
-    get_can_heat_cool,
-    is_mpc_active,
-)
-from ..control.residual_heat import afterglow_rise_k, get_min_run_blocks, residual_tau
+from ..control.central_mpc import is_room_mpc_ready
 from ..control.solar import compute_q_solar_norm
 from ..control.thermal_model import ThermalEKF
 from ..utils.history_store import MODEL_INPUT_FIELDS
@@ -40,6 +35,8 @@ from .model_backtest import backtest
 _LOGGER = logging.getLogger(__name__)
 
 SOLAR_PEAK_STEP_S = 600
+# Placeholder for a missing outdoor reading, the same one the control path uses.
+DEFAULT_OUTDOOR_TEMP_FALLBACK = 10.0
 
 
 def clear_sky_peak_today(latitude: float, longitude: float, now: float) -> float:
@@ -51,30 +48,67 @@ def clear_sky_peak_today(latitude: float, longitude: float, now: float) -> float
     )
 
 
-def _afterglow_figures(room_config: dict, est: Any, q_heat: float, acs_can_heat: bool) -> dict:
-    """What the radiators' stored heat does after a regular run (radiator rooms only).
+def _central_can_heat_cool(room_config: dict, settings: dict, outdoor_temp: float | None) -> tuple[bool, bool]:
+    """The heating and cooling sides a Thermal Zone can use under the Central Plant.
 
-    ``afterglow_k``: how far a full-power min run lifts the room after the stop, with the
-    learned scale and decay time; ``afterglow_minutes``: that decay time;
-    ``afterglow_learned``: whether a run has been measured yet (else the profile's guess).
-    Not with a heat-capable AC: the room never learns it there (its heat mixes in), the
-    tile would say "not measured yet" for good.
+    One shared forced-air plant serves every room, so only the room's climate mode and
+    the outdoor gates decide (there is no per-room device to check): a heat-only room
+    never cools, a cool-only room never heats, and an outdoor reading past a gate closes
+    that side. An active override bypasses the gates because the user asked for that
+    temperature now, and an outdoor room is conditioned by the weather, not the plant.
     """
-    if acs_can_heat or room_config.get("heating_system_type", "") != HEATING_SYSTEM_RADIATOR:
-        return {}
-    minutes = get_min_run_blocks(HEATING_SYSTEM_RADIATOR) * 5.0
-    return {
-        "afterglow_k": round(
-            afterglow_rise_k(HEATING_SYSTEM_RADIATOR, q_heat, minutes, est.residual_scale, est.residual_tau), 2
-        ),
-        "afterglow_minutes": round(residual_tau(HEATING_SYSTEM_RADIATOR, est.residual_tau)),
-        "afterglow_learned": est.residual_scale_n > 0,
-    }
+    if room_config.get("is_outdoor", False):
+        return False, False
+    climate_mode = room_config.get("climate_mode", "auto")
+    can_heat = climate_mode != CLIMATE_MODE_COOL_ONLY
+    can_cool = climate_mode != CLIMATE_MODE_HEAT_ONLY
+    if outdoor_temp is not None and not is_override_active(room_config):
+        if outdoor_temp > settings.get("outdoor_heating_max", DEFAULT_OUTDOOR_HEATING_MAX):
+            can_heat = False
+        if outdoor_temp < settings.get("outdoor_cooling_min", DEFAULT_OUTDOOR_COOLING_MIN):
+            can_cool = False
+    return can_heat, can_cool
 
 
-# EKF states of the solar and occupancy gains (thermal_model.ThermalEKF)
-_SOLAR_STATE = 4
-_OCCUPANCY_STATE = 5
+def _occupancy_trend(coordinator: Any, area_id: str) -> list[float]:
+    """The room's learned 24 h Occupancy Trend (96 quarter-hour values), empty without one."""
+    manager = getattr(coordinator, "_occupancy_manager", None)
+    if manager is None:
+        return []
+    profile = manager.get_24h_profile(area_id, weekend=dt_util.now().weekday() >= 5)
+    return [float(value) for value in profile]
+
+
+def _rebound_charge(coordinator: Any, area_id: str) -> float:
+    """Signed air/mass charge of the room's forced-air run (0.0 without a tracker)."""
+    tracker = getattr(coordinator, "_rebound_tracker", None)
+    charge = tracker.charge(area_id) if tracker is not None else 0.0
+    return float(charge) if isinstance(charge, int | float) else 0.0
+
+
+def _current_humidity(coordinator: Any, area_id: str, points: list[dict]) -> float | None:
+    """Relative humidity of the room now: its live reading, else the last recorded one."""
+    live: dict = coordinator.rooms.get(area_id) or {}
+    humidity = live.get("current_humidity")
+    if isinstance(humidity, int | float):
+        return float(humidity)
+    for point in reversed(points):
+        value = point.get("humidity")
+        if value is not None:
+            return float(value)
+    return None
+
+
+# EKF states of the Central Forced-Air model (thermal_model.ThermalEKF)
+# x = [T, alpha_out, alpha_house, beta_h, beta_c, beta_fan, beta_s, beta_o, beta_f]
+_ALPHA_OUT_STATE = 1
+_ALPHA_HOUSE_STATE = 2
+_BETA_H_STATE = 3
+_BETA_C_STATE = 4
+_BETA_FAN_STATE = 5
+_SOLAR_STATE = 6
+_OCCUPANCY_STATE = 7
+_FAST_STATE = 8
 # A gain counts as learned once its variance fell below this share of its start value
 LEARNED_VARIANCE_SHARE = 0.25
 
@@ -142,9 +176,18 @@ def _csv_to_points(rows: list[dict]) -> list[dict]:
                 "price_shift": _safe_float(row.get("price_shift", "")),
                 "heat_starts": _safe_int(row.get("heat_starts", "")),
                 "cool_starts": _safe_int(row.get("cool_starts", "")),
+                "circulate_starts": _safe_int(row.get("circulate_starts", "")),
                 "room_temp_max": _safe_float(row.get("room_temp_max", "")),
                 "room_temp_min": _safe_float(row.get("room_temp_min", "")),
                 "co2": _safe_float(row.get("co2", "")),
+                # Central HVAC: the resolved control variables behind the mode and the two
+                # binary inputs the forced-air model integrates
+                "effective_temp": _safe_float(row.get("effective_temp", "")),
+                "priority_weight": _safe_float(row.get("priority_weight", "")),
+                "door_open": row.get("door_open", "") in ("True", "true", "1"),
+                "fan_circulating": row.get("fan_circulating", "") in ("True", "true", "1"),
+                # The House Reference Temperature the model learned from, under its own name
+                "house_temp": _safe_float(row.get("model_house_temp", "")),
                 **{f: _safe_float(row.get(f, "")) for f in MODEL_INPUT_FIELDS},
             }
         )
@@ -317,9 +360,12 @@ async def build_analytics_data(
     else:
         for point in history + detail:
             point["predicted_temp"] = None
-    # Only the figures need the run starts, bucket extremes and model inputs; 90 days of points would carry them
+    # Only the figures need the run starts, bucket extremes and model inputs; 90 days of
+    # points would carry them. The control variables (effective temp, priority, openings,
+    # house temperature) stay: they are one number per point and the page draws them.
     for point in history + detail:
-        del point["heat_starts"], point["cool_starts"], point["room_temp_max"], point["room_temp_min"]
+        del point["heat_starts"], point["cool_starts"], point["circulate_starts"]
+        del point["room_temp_max"], point["room_temp_min"]
         for f in MODEL_INPUT_FIELDS:
             del point[f]
 
@@ -339,48 +385,22 @@ async def build_analytics_data(
 
     # Model info (only if estimator exists -- avoid auto-creating for unknown rooms)
     model_info: dict = {}
-    mpc_active = False
-    # The controller's path, which the prediction follows; differs from mpc_active only when
-    # the outdoor limits close both sides (see is_mpc_active)
-    mpc_runs = False
+    # The joint whole-home MPC advances every Thermal Zone together, so the room's own gate
+    # is its EKF: ready for the plant modes it may use means its curve is planned, and the
+    # forecast simulates that path (Circulation is available to a room whose sides are closed).
+    mpc_ready = False
     if coordinator:
         mgr = coordinator._model_manager
         if area_id in mgr._estimators:
             est = mgr._estimators[area_id]
-            rc = est.get_model()
+            rc_model = est.get_model()
             pred_std_idle = est.prediction_std(0.0, 20.0, 15.0, 5.0)
-            pred_std_heat = est.prediction_std(rc.Q_heat, 20.0, 10.0, 5.0)
-            has_ext_sensor = bool(room_config.get("temperature_sensor"))
-            if has_ext_sensor:
-                acs_heat = check_acs_can_heat(hass, room_config)
-                can_heat, can_cool = get_can_heat_cool(
-                    room_config,
-                    coordinator.outdoor_temp_effective,
-                    settings.get("outdoor_cooling_min", DEFAULT_OUTDOOR_COOLING_MIN),
-                    settings.get("outdoor_heating_max", DEFAULT_OUTDOOR_HEATING_MAX),
-                    acs_can_heat=acs_heat,
-                    override_active=is_override_active(room_config),
-                )
-                T_out = (
-                    coordinator.outdoor_temp_effective
-                    if coordinator.outdoor_temp_effective is not None
-                    else DEFAULT_OUTDOOR_TEMP_FALLBACK
-                )
-                mpc_runs = is_mpc_active(mgr, area_id, can_heat, can_cool, 20.0, T_out, settings=settings)
-                mpc_active = mpc_runs and (
-                    can_heat
-                    or can_cool
-                    or is_mpc_active(
-                        mgr,
-                        area_id,
-                        can_heat,
-                        can_cool,
-                        20.0,
-                        T_out,
-                        settings=settings,
-                        room_sides=get_can_heat_cool(room_config, acs_can_heat=acs_heat),
-                    )
-                )
+            pred_std_heat = est.prediction_std(rc_model.Q_heat, 20.0, 10.0, 5.0)
+            can_heat, can_cool = _central_can_heat_cool(room_config, settings, coordinator.outdoor_temp_effective)
+            # Bang-bang control never runs the joint plan, however ready the model is
+            mpc_ready = settings.get("control_mode", DEFAULT_CONTROL_MODE) != CONTROL_MODE_BANGBANG and (
+                is_room_mpc_ready(est, can_heat, can_cool)
+            )
             # EKF uncertainty: sqrt(P[0][0]) as proxy for sigma_e
             sigma_proxy = math.sqrt(max(est._P[0][0], 0.0))
             has_occupancy_sensors = len(room_config.get("occupancy_sensors", [])) > 0
@@ -396,32 +416,39 @@ async def build_analytics_data(
                     }
                     for e in est.confidence_history
                 ],
-                "model": rc.to_dict(),
+                "model": rc_model.to_dict(),
                 "n_samples": est._n_updates,
                 "n_observations": est._n_updates,
                 "last_update_at": est._last_update_at,
                 "n_heating": est._n_heating,
                 "n_cooling": est._n_cooling,
                 "applicable_modes": sorted(est._applicable_modes),
-                "mpc_active": mpc_active,
+                "mpc_active": mpc_ready,
                 "sigma_e": round(sigma_proxy, 4),
                 "prediction_std_idle": round(pred_std_idle, 4),
                 "prediction_std_heating": round(pred_std_heat, 4),
                 "has_occupancy_sensors": has_occupancy_sensors,
                 "solar_learned": _observed(est, _SOLAR_STATE),
                 "occupancy_learned": _observed(est, _OCCUPANCY_STATE),
+                # Central Forced-Air model: how fast the blower mixes the room with the house
+                # (1/h) and how strongly it couples to it passively, both learned
+                "fan_mix_rate": round(rc_model.Q_fan, 3),
+                "fan_mix_learned": _observed(est, _BETA_FAN_STATE),
+                "house_coupling": round(rc_model.U_house, 3),
+                "house_coupling_learned": _observed(est, _ALPHA_HOUSE_STATE),
+                # When the room tends to be occupied, for the comfort card's outlook
+                "occupancy_trend_24h": _occupancy_trend(coordinator, area_id),
                 # Q_solar is the gain at full sun (1000 W/m²); these are what it means now and today
                 "solar_gain_now": round(
-                    rc.Q_solar
+                    rc_model.Q_solar
                     * coordinator._current_q_solar
                     * coordinator.rooms.get(area_id, {}).get("shading_factor", 1.0),
                     3,
                 ),
                 "solar_gain_today_max": round(
-                    rc.Q_solar * clear_sky_peak_today(hass.config.latitude, hass.config.longitude, time.time()),
+                    rc_model.Q_solar * clear_sky_peak_today(hass.config.latitude, hass.config.longitude, time.time()),
                     3,
                 ),
-                **_afterglow_figures(room_config, est, rc.Q_heat, check_acs_can_heat(hass, room_config)),
                 "backtest": backtest_figures,
             }
 
@@ -467,9 +494,13 @@ async def build_analytics_data(
                     current_t = p["room_temp"]
                     break
             if current_t is not None:
+                outdoor_now = coordinator.outdoor_temp_effective
+                if outdoor_now is None and not coordinator._weather_manager._outdoor_forecast:
+                    # Neither a reading nor a forecast: the placeholder of the control path
+                    outdoor_now = DEFAULT_OUTDOOR_TEMP_FALLBACK
                 outdoor_series = build_forecast_outdoor_series(
                     coordinator._weather_manager._outdoor_forecast,
-                    coordinator.outdoor_temp_effective,
+                    outdoor_now,
                     len(target_forecast),
                 )
                 # Shading factor from current cover positions
@@ -486,28 +517,6 @@ async def build_analytics_data(
                     len(target_forecast),
                     shading_factor=_shading,
                 )
-                # Residual heat state for analytics simulation
-                system_type = room_config.get("heating_system_type", "")
-                # The learned residual heat applies to radiator rooms only
-                sim_scale = est.residual_scale if system_type == HEATING_SYSTEM_RADIATOR else 1.0
-                # Learned afterglow decay time (radiators); None uses the profile's
-                sim_tau = est.residual_tau if system_type == HEATING_SYSTEM_RADIATOR else None
-                sim_q_residual = 0.0
-                sim_heat_dur = 0.0
-                # Power of the run in progress or the last one (the prediction weighs its afterglow)
-                sim_last_pf = coordinator._residual_tracker._off_power.get(area_id, 1.0)
-                if system_type and area_id in getattr(coordinator._residual_tracker, "_off_since", {}):
-                    import time as _time
-
-                    off_since = coordinator._residual_tracker._off_since[area_id]
-                    elapsed = (_time.time() - off_since) / 60.0
-                    sim_heat_dur = (off_since - coordinator._residual_tracker._on_since.get(area_id, off_since)) / 60.0
-                    from ..control.residual_heat import compute_residual_heat
-
-                    sim_q_residual = compute_residual_heat(
-                        elapsed, system_type, sim_last_pf, sim_heat_dur, sim_scale, sim_tau
-                    )
-
                 sim_q_occupancy = 0.0
                 for occ_eid in room_config.get("occupancy_sensors", []):
                     occ_state = hass.states.get(occ_eid)
@@ -530,24 +539,19 @@ async def build_analytics_data(
                         outdoor_series=outdoor_series,
                         current_temp=current_t,
                         window_open=coordinator._window_manager._paused.get(area_id, False),
-                        mpc_active=mpc_runs,
+                        mpc_active=mpc_ready,
                         room_config=room_config,
                         settings=settings,
                         all_points=all_points,
                         solar_series=solar_series,
-                        acs_can_heat=check_acs_can_heat(hass, room_config),
-                        q_residual=sim_q_residual,
-                        heating_system_type=system_type,
-                        heating_duration_minutes=sim_heat_dur,
-                        last_power_fraction=sim_last_pf,
-                        residual_scale=sim_scale,
-                        residual_tau=sim_tau,
                         q_occupancy=sim_q_occupancy,
-                        q_rebound=coordinator._rebound_tracker.get_charge(area_id),
+                        # Signed forced-air charge of the run in progress: the air leads the
+                        # mass during the run and relaxes back after it, so the forecast shows it
+                        q_rebound=_rebound_charge(coordinator, area_id),
+                        # The room's humidity seeds the Effective Temperature of the roll-out
+                        current_rh_pct=_current_humidity(coordinator, area_id, all_points),
                         previous_mode=sim_prev_mode,
                         mode_elapsed_minutes=sim_mode_elapsed,
-                        # AC heating alone in an orchestrated UFH room runs on AC rules
-                        run_system=("" if coordinator._heat_source_states.get(area_id) == "secondary" else system_type),
                         outdoor_known=(
                             coordinator.outdoor_temp_effective is not None
                             or bool(coordinator._weather_manager._outdoor_forecast)

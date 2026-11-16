@@ -1,0 +1,3 @@
+# Bounded relative setpoint nudging and idle fallback band
+
+RoomMind actuates the Central Thermostat by shifting its active heating or cooling setpoint just past `thermostat.current_temperature` (clamped within a small safety headroom beyond active room targets) and parking in a neutral Fallback Band (`heat_cool` range when supported) during idle and Circulation, rather than sending room target temperatures directly or switching `hvac_mode` to `off`. Because the Central Thermostat senses temperature in a single hallway or room, sending a remote room's target temperature fails to trigger calls whenever the hallway is already satisfied, while extreme boost setpoints or `hvac_mode: off` risk thermal runaway or freeze damage if Home Assistant or Wi-Fi goes offline.

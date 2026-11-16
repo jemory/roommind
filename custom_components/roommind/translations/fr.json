@@ -36,6 +36,15 @@
               "none": "Planification",
               "manual": "Manuel"
             }
+          },
+          "hvac_action": {
+            "state": {
+              "off": "Arrêt",
+              "idle": "Inactif",
+              "heating": "Chauffage",
+              "cooling": "Refroidissement",
+              "fan": "Circulation"
+            }
           }
         }
       }
@@ -43,6 +52,21 @@
     "binary_sensor": {
       "air_quality": {
         "name": "{room} qualité de l’air mauvaise"
+      },
+      "wet_coil_lockout": {
+        "name": "Verrouillage serpentin humide",
+        "state": {
+          "on": "Verrouillé",
+          "off": "Dégagé"
+        }
+      }
+    },
+    "sensor": {
+      "central_action": {
+        "name": "Action centrale"
+      },
+      "house_temperature": {
+        "name": "Température de référence de la maison"
       }
     }
   }

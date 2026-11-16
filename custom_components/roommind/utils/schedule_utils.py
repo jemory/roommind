@@ -220,6 +220,26 @@ def cap_cool_only_heat(heat: float | None, cool: float | None, climate_mode: str
     return heat, cool
 
 
+def is_plant_override_at(ts: float, settings: dict, *, presence_away: bool = False) -> bool:
+    """Return True when a whole-home plant override is in force at ``ts``.
+
+    A manual setpoint change on the Central Thermostat — the shared wall thermostat of the
+    Central HVAC plant — becomes a plant override that holds until its expiry; it outranks
+    the schedule, vacation and presence branches of the resolver. While the home is
+    presence-away and ``presence_clears_override`` is set, the override is held, not applied.
+    """
+    p_heat = settings.get("plant_override_heat")
+    p_cool = settings.get("plant_override_cool")
+    if p_heat is None and p_cool is None:
+        return False
+    p_until = settings.get("plant_override_until")
+    if p_until is not None and ts >= p_until:
+        return False
+    if presence_away and bool(settings.get("presence_clears_override", False)):
+        return False
+    return True
+
+
 def resolve_target_at_time(
     ts: float,
     schedule_blocks: dict | None,
@@ -284,26 +304,57 @@ def resolve_targets_at_time(
     schedule_off_action: str = "eco",
     presence_clears_override: bool = False,
     room_vacant: bool = False,
+    plant_override_until: float | None = None,
+    plant_override_heat: float | None = None,
+    plant_override_cool: float | None = None,
 ) -> TargetTemps:
     """Resolve dual heat/cool target temps at a specific timestamp.
 
     Returns TargetTemps(heat, cool). None values mean "force off".
     ``room_vacant`` caps the schedule result at eco (occupancy eco, #180).
+
+    A whole-home plant override (``plant_override_heat`` / ``plant_override_cool``) sits
+    between the per-room override and the vacation branch; a one-sided wall setpoint takes
+    the other side from the schedule it replaces instead of crossing the heat/cool band.
     """
     # 1. Override — split heat/cool dead-band (skipped when presence-away suppresses it)
     if (override_heat is not None or override_cool is not None) and (override_until is None or ts < override_until):
         if not (presence_away and presence_clears_override):
             return TargetTemps(heat=override_heat, cool=override_cool)
-    # 2. Vacation — heat setback, cooling stays at eco_cool
+    # 2. Whole-home plant override — the Central Thermostat wall setpoint wins over the schedule
+    if (
+        (plant_override_heat is not None or plant_override_cool is not None)
+        and (plant_override_until is None or ts < plant_override_until)
+        and not (presence_away and presence_clears_override)
+    ):
+        sched = _schedule_targets_at_time(
+            ts,
+            schedule_blocks,
+            comfort_heat,
+            comfort_cool,
+            eco_heat,
+            eco_cool,
+            block_temp_converter,
+            schedule_off_action,
+        )
+        h = plant_override_heat if plant_override_heat is not None else sched.heat
+        c = plant_override_cool if plant_override_cool is not None else sched.cool
+        if h is not None and c is not None and c < h:
+            if plant_override_cool is None:
+                c = h
+            else:
+                h = c
+        return TargetTemps(heat=h, cool=c)
+    # 3. Vacation — heat setback, cooling stays at eco_cool
     if vacation_until is not None and ts < vacation_until and vacation_temp is not None:
         t = float(vacation_temp)
         return TargetTemps(heat=t, cool=max(t, eco_cool))
-    # 2.5 Presence
+    # 4. Presence
     if presence_away:
         if presence_away_action == "off":
             return TargetTemps(heat=None, cool=None)
         return TargetTemps(heat=eco_heat, cool=eco_cool)
-    # 3. Schedule blocks
+    # 5. Schedule blocks
     targets = _schedule_targets_at_time(
         ts, schedule_blocks, comfort_heat, comfort_cool, eco_heat, eco_cool, block_temp_converter, schedule_off_action
     )
@@ -509,14 +560,18 @@ async def read_schedule_blocks(
 def schedule_sets_target(ts: float, room: dict, settings: dict, *, presence_away: bool, room_vacant: bool) -> bool:
     """Whether the schedule (or comfort/eco without one) sets the target at ``ts``.
 
-    Only then may the electricity price shift it: an override is the user's own choice,
-    vacation and absence lower the target on purpose, and an empty room never gets more
-    than eco (#180).
+    Only then may the electricity price shift it: an override, a whole-home plant override
+    and vacation/absence lower the target on purpose, and an empty room never gets more than
+    eco (#180).
     """
     if presence_away or room_vacant:
         return False
     vacation_until = settings.get("vacation_until")
     if vacation_until is not None and settings.get("vacation_temp") is not None and ts < vacation_until:
+        return False
+    if is_plant_override_at(ts, settings, presence_away=presence_away):
+        # A manual Central Thermostat wall setpoint is the user's own choice, not a price
+        # opportunity: never price-shift a plant override.
         return False
     if room.get("override_heat") is None and room.get("override_cool") is None:
         return True
@@ -534,7 +589,12 @@ def price_shifted(
     presence_away: bool,
     room_vacant: bool,
 ) -> tuple[TargetTemps, tuple[float, float]]:
-    """Targets moved with the price where the room opted in, and the (heat, cool) shift applied."""
+    """Targets moved with the price where the room opted in, and the (heat, cool) shift applied.
+
+    Central heating is a fuel furnace while central cooling is an electric heat pump, so the
+    electricity price shifts the cooling side by default; the Central Plant setting
+    ``price_shift_modes`` of "both" opts into shifting the heating target as well.
+    """
     shift = float(room.get("price_shift") or 0.0)
     if price_signal is None or shift <= 0 or room.get("is_outdoor"):
         return targets, (0.0, 0.0)
@@ -545,6 +605,17 @@ def price_shifted(
     def delta(new: float | None, old: float | None) -> float:
         return round(new - old, 3) if new is not None and old is not None else 0.0
 
+    # Central heating is a fuel furnace while central cooling is an electric heat pump, so
+    # an electricity price only ever charges the cooling side by default; "both" opts into
+    # shifting the heating target as well.
+    plant_cfg = settings.get("central_plant")
+    mode = str((plant_cfg or {}).get("price_shift_modes", settings.get("price_shift_modes", "cool_only")))
+    if mode == "cool_only":
+        new_heat = targets.heat
+        new_cool = shifted.cool
+        if new_heat is not None and new_cool is not None and new_cool < new_heat:
+            new_cool = new_heat
+        shifted = TargetTemps(heat=new_heat, cool=new_cool)
     return shifted, (delta(shifted.heat, targets.heat), delta(shifted.cool, targets.cool))
 
 
@@ -575,6 +646,9 @@ def make_target_resolver(
     presence_away_action = settings.get("presence_away_action", "eco")
     schedule_off_action = settings.get("schedule_off_action", "eco")
     presence_clears_override = bool(settings.get("presence_clears_override", False))
+    plant_override_until = settings.get("plant_override_until")
+    plant_override_heat = settings.get("plant_override_heat")
+    plant_override_cool = settings.get("plant_override_cool")
     climate_mode = room.get("climate_mode", "auto")
 
     converter: Callable[[float], float] | None = None
@@ -603,6 +677,9 @@ def make_target_resolver(
             schedule_off_action=schedule_off_action,
             presence_clears_override=presence_clears_override,
             room_vacant=room_vacant,
+            plant_override_until=plant_override_until,
+            plant_override_heat=plant_override_heat,
+            plant_override_cool=plant_override_cool,
         )
         if targets.heat is None and targets.cool is None:
             return targets

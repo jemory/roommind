@@ -1,0 +1,94 @@
+name: central-sleeping-pir-bedroom
+description: >
+  January night in a US wood-frame house on one Central Plant. The bedroom carries a
+  PIR occupancy sensor that stops reporting motion once the sleeper is in bed (forced to
+  "off" here from 22:05, 2 min off delay), while the room's sleep schedule block runs
+  22:00-07:00. With occupancy_mode: schedule_assumed_when_on the schedule's "on" block is
+  the floor of the room's Occupancy Trend, so the bedroom keeps its sleep comfort target
+  (18.5 °C) all night although occupancy == off, and drops to eco only at 07:00.
+refs: [1, 3]
+tags: [central-plant, occupancy, sleeping, schedule]
+start: 2026-01-12T18:00
+duration: 1d
+location: {latitude: 40.7, longitude: -74.0, time_zone: America/New_York, unit_system: us_customary, country: US}
+weather: {profile: winter-cold}
+house:
+  building: us_wood_frame
+  floors: {ground: Ground floor, upper: Upstairs}
+  outdoor: {sensors: {temperature: sensor.outdoor_temp}}
+  rooms:
+    living_room:
+      name: Living room
+      floor: ground
+      floor_area_m2: 36
+      exterior_wall_m2: 22
+      initial: {temperature: 20.0}
+      windows: [{orientation: S, area_m2: 4, g_value: 0.6}]
+      devices:
+        - {entity_id: climate.central_hvac, profile: central_furnace_hp, heat_capacity_w: 7000, serves_rooms: [bedroom], supply_shares: {living_room: 0.6, bedroom: 0.4}}
+      sensors:
+        temperature: {entity_id: sensor.living_room_temp}
+        occupancy: {entity_id: binary_sensor.living_room_presence}
+    bedroom:
+      name: Bedroom
+      floor: upper
+      floor_area_m2: 14
+      exterior_wall_m2: 10
+      initial: {temperature: 19.0}
+      windows: [{orientation: W, area_m2: 1.8, g_value: 0.6}]
+      sensors:
+        temperature: {entity_id: sensor.bedroom_temp}
+        occupancy: {entity_id: binary_sensor.bedroom_presence}
+people:
+  - id: robin
+    plan:
+      presence: {weekday: ["home@00:00"], weekend: ["home@00:00"]}
+      rooms: {sleeping: "22:00-07:00", living: "default"}
+    rooms: {sleeping: bedroom, living: living_room}
+helpers:
+  schedule:
+    sleep_block: {daily: ["22:00-07:00"]}
+roommind:
+  settings:
+    outdoor_temp_sensor: sensor.outdoor_temp
+    weather_entity: weather.simhome
+    central_plant:
+      thermostat_entity: climate.central_hvac
+      nudge_delta_c: 1.5
+      max_nudge_headroom_c: 3.0
+      fallback_heat_c: 16.5
+      fallback_cool_c: 27.0
+      min_deadband_c: 2.5
+      min_run_minutes: 10
+      min_off_minutes: 5
+      exterior_open_policy: pause_unless_door_closed
+  rooms:
+    living_room:
+      temperature_sensor: sensor.living_room_temp
+      occupancy_sensors: [binary_sensor.living_room_presence]
+      climate_mode: heat_only
+      comfort_heat: 21.0
+      eco_heat: 17.0
+    bedroom:
+      temperature_sensor: sensor.bedroom_temp
+      occupancy_sensors: [binary_sensor.bedroom_presence]
+      # A sleeping person does not trip the PIR: the schedule's on-block stands in.
+      occupancy_mode: schedule_assumed_when_on
+      schedules: [{entity_id: schedule.sleep_block}]
+      climate_mode: heat_only
+      comfort_heat: 18.5
+      eco_heat: 16.0
+timeline:
+  # 22:05: the sleeper is in bed, no motion for the rest of the night (9 h).
+  - {at: "+0d04h05m", do: occupancy.set, room: bedroom, count: 0, for: 9h}
+expect:
+  - {invariant: no_rejected_commands}
+  - {invariant: setpoints_within_device_range}
+  - {invariant: target_never_empty}
+  # No occupancy, but the sleep block holds the comfort target all night.
+  - {check: "world.rooms.bedroom.occupants == 0 and room.bedroom.heat_target == 18.5", at: "+0d04h30m", label: PIR off, sleep block holds 18.5}
+  - {check: "world.rooms.bedroom.occupants == 0 and room.bedroom.heat_target == 18.5 and true_temp('bedroom') >= 18.0", at: "+0d07h00m", label: 01:00, room held at the sleep target}
+  - {check: "world.rooms.bedroom.occupants == 0 and room.bedroom.heat_target == 18.5 and true_temp('bedroom') >= 18.0", at: "+0d11h30m", label: 05:30, still at the sleep target}
+  - {check: "room.bedroom.heat_target == 16.0", at: "+0d13h30m", label: 07:30, the block ended and eco applies}
+  - {metric: comfort.undershoot_kh, room: bedroom, max: 4.0, label: the furnace carried the bedroom through the night}
+  - {metric: room.temp_max, room: bedroom, max: 22.0, label: no runaway overnight run}

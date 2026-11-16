@@ -1,53 +1,74 @@
 name: area-removed-room-rests
 description: >
-  A Home Assistant area is deleted while RoomMind runs. Its room rests (devices switched off
-  once, then no control, not listed, no entities) but keeps its settings and learned model; before the fix it stayed listed, could
-  not be deleted and kept driving its devices. The area is created again under the same name
-  (same id) and the room continues with what it learned. The other room carries on.
+  A Home Assistant area is deleted while RoomMind runs a house on one Central Plant. Its
+  Thermal Zone rests (not listed, no entities) but keeps its settings and learned model;
+  before the fix it stayed listed, could not be deleted and kept driving the plant. The
+  shared Central Plant must stay available for the other room - deleting one area must never
+  switch the house's furnace off. The area is created again under the same name (same id) and
+  the room continues with what it learned.
 refs: [494]
 # Not covered here: a restart while resting (the sim provisions every house area again on
 # start, which brings the area back); unit tests cover the stored rest_switched_off flag.
-tags: [entities, lifecycle]
+tags: [entities, lifecycle, central-plant]
 start: 2026-01-12T00:00
 duration: 1d
-location: {latitude: 52.5, longitude: 13.4, time_zone: Europe/Berlin}
+location: {latitude: 40.7, longitude: -74.0, time_zone: America/New_York, unit_system: us_customary, country: US}
 weather: {profile: temperate}
 house:
-  building: bestand_teilsaniert
-  outdoor: {sensors: {temperature: sensor.aussen_temp}}
+  building: us_wood_frame
+  floors: {ground: Ground floor, upper: Upstairs}
+  outdoor: {sensors: {temperature: sensor.outdoor_temp}}
   rooms:
-    wohnzimmer:
-      floor_area_m2: 22
+    living_room:
+      name: Living room
+      floor: ground
+      floor_area_m2: 30
+      exterior_wall_m2: 18
       initial: {temperature: 19.0}
-      devices: [{entity_id: climate.wz_trv, profile: generic_trv}]
-      sensors: {temperature: {entity_id: sensor.wz_temp}}
-    gaestezimmer:
+      devices:
+        - {entity_id: climate.central_hvac, profile: central_furnace_hp, heat_capacity_w: 7000, serves_rooms: [guest_room], supply_shares: {living_room: 0.75, guest_room: 0.25}}
+      sensors: {temperature: {entity_id: sensor.living_room_temp}}
+    guest_room:
+      name: Guest room
+      floor: upper
       floor_area_m2: 12
+      exterior_wall_m2: 8
       initial: {temperature: 18.0}
-      devices: [{entity_id: climate.gz_trv, profile: generic_trv}]
-      sensors: {temperature: {entity_id: sensor.gz_temp}}
+      windows: [{orientation: N, area_m2: 1.5}]
+      sensors: {temperature: {entity_id: sensor.guest_room_temp}}
 roommind:
   settings:
-    outdoor_temp_sensor: sensor.aussen_temp
+    outdoor_temp_sensor: sensor.outdoor_temp
+    weather_entity: weather.simhome
+    central_plant:
+      thermostat_entity: climate.central_hvac
+      nudge_delta_c: 1.5
+      max_nudge_headroom_c: 3.0
+      fallback_heat_c: 16.5
+      fallback_cool_c: 27.0
+      min_deadband_c: 2.5
+      min_run_minutes: 10
+      min_off_minutes: 5
+      exterior_open_policy: pause_unless_door_closed
   rooms:
-    wohnzimmer:
-      devices: [{entity_id: climate.wz_trv, type: trv, heating_system_type: radiator}]
-      temperature_sensor: sensor.wz_temp
+    living_room:
+      temperature_sensor: sensor.living_room_temp
       climate_mode: heat_only
-      comfort_temp: 21.0
-    gaestezimmer:
-      devices: [{entity_id: climate.gz_trv, type: trv, heating_system_type: radiator}]
-      temperature_sensor: sensor.gz_temp
+      comfort_heat: 21.0
+      eco_heat: 17.0
+    guest_room:
+      temperature_sensor: sensor.guest_room_temp
       climate_mode: heat_only
-      comfort_temp: 20.0
+      comfort_heat: 20.0
+      eco_heat: 16.0
 timeline:
-  - {at: "+6h", do: roommind.ws, type: config/area_registry/delete, area_id: gaestezimmer}
-  - {at: "+10h", do: roommind.ws, type: config/area_registry/create, name: Gaestezimmer}
+  - {at: "+6h", do: roommind.ws, type: config/area_registry/delete, area_id: guest_room}
+  - {at: "+10h", do: roommind.ws, type: config/area_registry/create, name: Guest room}
 expect:
-  - {check: "room.gaestezimmer != null and room.wohnzimmer != null", at: "+5h", label: both rooms run before the area is deleted}
-  - {check: "room.gaestezimmer == null", at: "+7h", label: room rests while its area is gone}
-  - {check: "dev('climate.gz_trv').mode == 'off'", at: "+7h", label: its thermostat is switched off instead of left at the boost}
-  - {check: "room.gaestezimmer == null and dev('climate.gz_trv').mode == 'off'", at: "+9h", label: still resting and off before the area is back}
-  - {check: "room.gaestezimmer != null and room.gaestezimmer.n_observations >= 100", at: "+10h05m", label: room is back with its learned model}
-  - {check: "room.wohnzimmer != null", at: "+23h", label: the other room keeps running}
+  - {check: "room.guest_room != null and room.living_room != null", at: "+5h", label: both rooms run before the area is deleted}
+  - {check: "room.guest_room == null", at: "+7h", label: room rests while its area is gone}
+  - {check: "dev('climate.central_hvac').mode != 'off'", at: "+7h", label: the shared plant is not switched off for the other room}
+  - {check: "room.guest_room == null and room.living_room != null", at: "+9h", label: still resting while the house carries on}
+  - {check: "room.guest_room != null and room.guest_room.n_observations >= 100", at: "+10h05m", label: room is back with its learned model}
+  - {check: "room.living_room != null", at: "+23h", label: the other room keeps running}
   - {invariant: no_rejected_commands}

@@ -1,53 +1,81 @@
 name: covers-window-hold
 refs: [268, 370]
 description: >
-  Mid June, bedroom with an inside roller blind that closes at sunset (night close).
-  The window is open in the evening past sunset and again at sunrise. With
-  covers_window_hold the blind must not go down while the window is open, follow
-  once it is closed, and still open at sunrise with the window open. The second
+  Mid June, bedroom with an inside roller blind that closes at sunset (night close) on a
+  house run by one Central Plant. The window is open in the evening past sunset and again
+  at sunrise. With covers_window_hold the blind must not go down while the window is open,
+  follow once it is closed, and still open at sunrise with the window open. The second
   evening has the window closed: night close as usual.
-tags: [covers, window]
+tags: [covers, window, central-plant]
 start: 2026-06-15T00:00
 duration: 2d
-location: {latitude: 52.5, longitude: 13.4, time_zone: Europe/Berlin}
+location: {latitude: 40.7, longitude: -74.0, time_zone: America/New_York, unit_system: us_customary, country: US}
 weather: {profile: temperate, fixed: {cloud: 30}}
 house:
-  building: bestand_teilsaniert
-  outdoor: {sensors: {temperature: sensor.aussen_temp}}
+  building: us_wood_frame
+  floors: {ground: Ground floor, upper: Upstairs}
+  outdoor: {sensors: {temperature: sensor.outdoor_temp}}
   rooms:
-    schlafzimmer:
+    living_room:
+      name: Living room
+      floor: ground
+      floor_area_m2: 32
+      exterior_wall_m2: 20
+      initial: {temperature: 22.0, mass_temperature: 22.0}
+      windows: [{orientation: S, area_m2: 3, g_value: 0.6}]
+      devices:
+        - {entity_id: climate.central_hvac, profile: central_furnace_hp, heat_capacity_w: 7000, serves_rooms: [bedroom], supply_shares: {living_room: 0.7, bedroom: 0.3}}
+      sensors:
+        temperature: {entity_id: sensor.living_room_temp}
+    bedroom:
+      name: Bedroom
+      floor: upper
       floor_area_m2: 16
       exterior_wall_m2: 11
       initial: {temperature: 21.0, mass_temperature: 21.0}
-      windows: [{orientation: W, area_m2: 1.8, sensor: binary_sensor.sz_fenster}]
-      covers: [{entity_id: cover.sz_rollo, profile: roller_shutter}]
-      devices: [{entity_id: climate.sz_trv, profile: generic_trv}]
+      windows: [{orientation: W, area_m2: 1.8, sensor: binary_sensor.bedroom_window}]
+      covers: [{entity_id: cover.bedroom_blind, profile: roller_shutter}]
       sensors:
-        temperature: {entity_id: sensor.sz_temp}
+        temperature: {entity_id: sensor.bedroom_temp}
 roommind:
   settings:
-    outdoor_temp_sensor: sensor.aussen_temp
+    outdoor_temp_sensor: sensor.outdoor_temp
     weather_entity: weather.simhome
+    central_plant:
+      thermostat_entity: climate.central_hvac
+      nudge_delta_c: 1.5
+      max_nudge_headroom_c: 3.0
+      fallback_heat_c: 16.5
+      fallback_cool_c: 27.0
+      min_deadband_c: 2.5
+      min_run_minutes: 10
+      min_off_minutes: 5
+      exterior_open_policy: pause_unless_door_closed
   rooms:
-    schlafzimmer:
-      devices: [{entity_id: climate.sz_trv, type: trv, heating_system_type: radiator}]
-      temperature_sensor: sensor.sz_temp
-      window_sensors: [binary_sensor.sz_fenster]
+    living_room:
+      temperature_sensor: sensor.living_room_temp
       climate_mode: heat_only
-      comfort_temp: 19.0
-      covers: [cover.sz_rollo]
+      comfort_heat: 21.0
+      eco_heat: 18.0
+    bedroom:
+      temperature_sensor: sensor.bedroom_temp
+      exterior_window_sensors: [binary_sensor.bedroom_window]
+      climate_mode: heat_only
+      comfort_heat: 19.0
+      eco_heat: 16.0
+      covers: [cover.bedroom_blind]
       covers_auto_enabled: true
       covers_night_close: true
       covers_night_position: 0
       covers_window_hold: true
 timeline:
-  # sunset ~21:33, sunrise ~04:43 local
-  - {at: "+0d20h", do: window.open, entity_id: binary_sensor.sz_fenster, for: 3h30m}
-  - {at: "+1d04h", do: window.open, entity_id: binary_sensor.sz_fenster, for: 2h}
+  # sunset ~20:30, sunrise ~05:25 local
+  - {at: "+0d20h", do: window.open, entity_id: binary_sensor.bedroom_window, for: 3h30m}
+  - {at: "+1d04h", do: window.open, entity_id: binary_sensor.bedroom_window, for: 2h}
 expect:
   - {invariant: no_rejected_commands}
   - {invariant: no_cover_lowered_over_open_window}
-  - {check: "cover('cover.sz_rollo').position > 90", at: "+0d23h00m", label: open window keeps the blind up after sunset}
-  - {check: "cover('cover.sz_rollo').position < 10", at: "+0d23h45m", label: night close follows once the window is shut}
-  - {check: "cover('cover.sz_rollo').position > 90", at: "+1d05h30m", label: blind opens at sunrise with the window open}
-  - {check: "cover('cover.sz_rollo').position < 10", at: "+1d22h30m", label: night close as usual with the window shut}
+  - {check: "cover('cover.bedroom_blind').position > 90", at: "+0d23h00m", label: open window keeps the blind up after sunset}
+  - {check: "cover('cover.bedroom_blind').position < 10", at: "+0d23h45m", label: night close follows once the window is shut}
+  - {check: "cover('cover.bedroom_blind').position > 90", at: "+1d05h30m", label: blind opens at sunrise with the window open}
+  - {check: "cover('cover.bedroom_blind').position < 10", at: "+1d22h30m", label: night close as usual with the window shut}

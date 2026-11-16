@@ -36,6 +36,15 @@
               "none": "Zeitplan",
               "manual": "Manuell"
             }
+          },
+          "hvac_action": {
+            "state": {
+              "off": "Aus",
+              "idle": "Leerlauf",
+              "heating": "Heizen",
+              "cooling": "Kühlen",
+              "fan": "Umluft"
+            }
           }
         }
       }
@@ -43,6 +52,21 @@
     "binary_sensor": {
       "air_quality": {
         "name": "{room} Luftqualität schlecht"
+      },
+      "wet_coil_lockout": {
+        "name": "Sperre nasses Kühlregister",
+        "state": {
+          "on": "Gesperrt",
+          "off": "Frei"
+        }
+      }
+    },
+    "sensor": {
+      "central_action": {
+        "name": "Zentrale Aktion"
+      },
+      "house_temperature": {
+        "name": "Hausreferenztemperatur"
       }
     }
   }

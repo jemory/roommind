@@ -1,230 +1,163 @@
-# Control And Device Guide
+# Central Plant Guide
 
-This page explains RoomMind's control settings and related device options.
+This page explains how to set up and tune RoomMind's Central HVAC control: the Central Thermostat, the Setpoint Nudge, the Fallback Band, the plant guards, and the room-level options that decide where the plant's air goes.
 
-## What Priority Does
+Everything here lives in two places: `Settings → Central HVAC` for the plant, and the room page (`Sensors`, `Schedule & temperatures`, `Covers & blinds`) for the Thermal Zones.
 
-In `Settings -> Control -> Priority`, the slider balances comfort against runtime/energy use for MPC.
+## 1. The Central Thermostat
 
-- Toward `Comfort`: RoomMind reacts earlier and works harder to stay close to the target temperature.
-- Toward `Efficiency`: RoomMind allows more drift around the target to reduce heating/cooling runtime.
+RoomMind drives a ducted forced-air system through **one** `climate.*` entity — the wall thermostat wired to the air handler. Set it in `Settings → Central HVAC → Central thermostat`.
 
-### Pre-heating
+What RoomMind needs from that entity:
 
-When a schedule block raises the target (for example eco 17 °C until 06:00, then 21 °C), RoomMind works out from the learned room model how long the room needs to heat up and starts early enough for the room to be warm when the block begins. Rooms whose radiators need hours to recover from a night setback start correspondingly early.
+| Attribute | Why |
+|---|---|
+| `hvac_modes` with `heat`, `cool` and preferably `heat_cool` | Heating, cooling, and a neutral Fallback Band as a range |
+| `hvac_action` | To know whether the furnace or compressor is really running (not just commanded) |
+| `fan_modes` with `auto` and `on` | `on` is used for Circulation, `auto` for idle |
+| `current_temperature` | The reference the nudge is relative to |
+| `min_temp` / `max_temp` | RoomMind never sends a setpoint outside them |
+| `target_temp_step` | Whole-degree or half-degree setpoints are respected |
 
-- At the default position and toward `Comfort`, pre-heating may start up to 12 hours ahead.
-- Below the default, the longest pre-heat lead shrinks with the slider; at full `Efficiency` RoomMind only heats shortly before the block, as before v1.7.9. The room then reaches the comfort temperature some time after the block has started, which uses a little less energy. The line under the slider shows the current limit in hours.
-- Each room has its own switch `Pre-heat before schedule blocks` in the schedule section. Turned off, that room only heats shortly before a block, whatever the slider says, for example a bedroom that should not heat up during the night. The same applies to the end of a vacation or an override. The switch is shown for rooms with their own temperature sensor in `Intelligent (MPC)` mode; underfloor heating keeps its own pre-heating unless an orchestrated AC heats the room.
-- Underfloor heating uses its own pre-heating that accounts for the heat stored in the screed.
-- Radiator rooms learn how much heat their radiators release after a run stops, and how slowly (from the room sensor in the hour after each undisturbed run). A run whose stored heat carries the room to the target stops early, also during pre-heating. Where a short run is enough, the pre-heat is a short run started as late as it still reaches the block, so less of the stored heat arrives after the block. Diagnostics show the learned values as `residual_scale` and `residual_decay_minutes`.
-- Rooms with an AC that cools pre-cool the same way: when a cooler schedule block (for example comfort 24 °C after eco 27 °C) cannot be reached by starting shortly before it, cooling starts early enough that the room is near the target when the block begins. It counts on the AC pulling the air down quickly at the start of a run, as the learned model does. The slider limit and the room switch apply to pre-cooling too; the switch is then called `Pre-cool before schedule blocks` (cool only) or `Pre-heat and pre-cool before schedule blocks`.
-- `Simple` control mode does not pre-heat or pre-cool.
+RoomMind only ever calls `set_hvac_mode`, `set_temperature` (single value or `target_temp_low`/`target_temp_high`) and `set_fan_mode`. It does not call vendor-specific services and it does not need the thermostat's own schedule.
 
-This setting does **not** change your schedule targets, overrides, comfort temperature, or eco temperature. It only changes how aggressively MPC tries to reach and hold those targets.
+Set **Thermostat area** as well: the area the thermostat is mounted in tells RoomMind where the wall unit measures the House Reference Temperature. If the thermostat sits in a hallway without a sensor, give the hallway one — the whole plan is built on that reading.
 
-## Thermostat vs Climate Device
+> The Central Thermostat must be the entity that runs the equipment. A smart TRV, a minisplit remote or an IR blaster cannot serve as the Central Thermostat.
 
-Both options are Home Assistant `climate.*` entities, but RoomMind treats them differently:
+## 2. Range Setpoint (`heat_cool`) or Single Setpoint
 
-- `Thermostat`: a radiator thermostat / TRV style device.
-- `Climate Device`: an AC, heat pump, or other climate entity used for cooling or forced-air heating.
+**Thermostats that support `heat_cool` with a range** get the Fallback Band as a range (`target_temp_low` / `target_temp_high`); while conditioning, the nudge moves the active side of that range past the thermostat's reading. This is the cleanest setup: idle is genuinely neutral, and the thermostat's own deadband protects the house between calls.
 
-In practice:
+**Single-setpoint thermostats** (heat or cool only, or a `heat_cool` mode without range support) get one idle setpoint derived from the Fallback Band and the room targets. Keep the Minimum deadband setting generous enough that the idle setpoint cannot sit within the thermostat's own hysteresis of the room temperature, or the unit will cycle on its own.
 
-- Choose `Thermostat` for radiator valves and similar heating-only valve devices.
-- Choose `Climate Device` for ACs, minisplits, heat pumps, and other self-contained HVAC units.
+### °F and whole-degree thermostats
 
-A climate device that can heat heats along with the thermostats in `Auto`. In `Heat only` it stays off when the room also has a thermostat, unless `Smart source selection` is on. In a room with only climate devices, `Heat only` heats with them.
+RoomMind works in °C internally and converts to the thermostat's unit when it sends a setpoint, so `min_temp` / `max_temp` are always evaluated in the device's own unit. On a **°F thermostat with whole-degree steps** (typical for Ecobee-style units) the nudge is rounded to the device's step: a 1.2 °C nudge becomes a 2 °F shift, which is still enough to start a call.
 
-## Full Control vs Managed
+Whole-degree snapping can produce a value that is identical to the one already set. RoomMind tracks what it sent, so an unchanged snapped setpoint is not re-sent every cycle — that is what keeps the command rate on such a thermostat low. If you see frequent commands, raise the Minimum deadband and lengthen the Minimum run; a very small nudge delta makes calls marginal and can make the unit start and stop more often.
 
-An external room temperature sensor is the key split:
+## 3. The Fallback Band
 
-- `Full Control`: RoomMind uses the external sensor as the room truth and can actively shape device output.
-- `Managed`: without an external room sensor, RoomMind sends target temperatures but the device mostly regulates itself using its own internal sensor.
+The **Fallback Band** is what is left on the thermostat whenever the plant is idle or circulating: a **Heating floor** and a **Cooling ceiling**. RoomMind does not park the thermostat in `hvac_mode: off` for idle, so the house stays protected if Home Assistant, Wi-Fi or the integration is unreachable. Only an explicit off does that: the presence-away action "Turn off devices", or `hvac_mode: off` on the room climate entity when that room is the only one the plant serves.
 
-This matters for the options below.
+- **Heating floor** — low enough that idle never heats (a few degrees under your coldest eco target), high enough to keep pipes and plants safe. The default is 16.5 °C.
+- **Cooling ceiling** — high enough that idle never cools, low enough that a hot house is not left to bake. The default is 26.5 °C.
+- **Minimum deadband** — the smallest gap kept between the two. With a range thermostat this is the band the unit will never cross on its own; with a single-setpoint thermostat it keeps the idle setpoint from hunting.
 
-## Changes Made on the Device
+Rules of thumb:
 
-RoomMind writes its setpoint to every device it controls and sets it again when the device reports something else, so a turn of the TRV dial is undone with RoomMind's next command (usually within 30 seconds; a TRV that RoomMind switched off keeps the value until its next run). With `Take over changes made on the device` (schedule settings of the room, off by default) such a change becomes the room target instead, until the next change of the active schedule, like a temperature set on the room climate entity. Without a schedule it holds until you end the override; if the schedule helper cannot be read at that moment, for 4 hours. A running override, also one with a duration, is replaced and then holds until the next schedule change as well.
+- The floor must be below every room's eco heating target, otherwise the Fallback Band would heat rooms you set to eco.
+- The ceiling must be above every room's eco cooling target for the same reason.
+- On a heat-pump house, leave the band wide: a narrow band turns idle into unintended conditioning.
 
-- The value set on the device is the new target, also in `Full Control`, where the device showed RoomMind's boost or idle setpoint before (e.g. 29.5 °C while heating, or 5 °C while idle). A direct setpoint offset is taken off again. Afterwards the device shows RoomMind's setpoint for the new target, not the value turned in.
-- ACs count too: a TRV and an AC in heating mode change the heating side, an AC in cooling or dry mode the cooling side, a range change on a `heat_cool` device both sides.
-- Only devices that report their setpoint to Home Assistant can be followed. IR devices without state feedback cannot.
-- Thermostats always change the heating side. An AC with a single setpoint in `heat_cool`/`auto` changes the side it reports heating or cooling for; when it reports neither, or is off or in fan mode, it counts only in heat-only or cool-only rooms (for the side the room uses). A change on a side the room does not use (e.g. a thermostat in a cool-only room) is ignored.
-- RoomMind cannot see who changed a setpoint. A value it sent itself and the device has not shown yet counts as RoomMind's, as does a setpoint the device reports while RoomMind switches its mode (until the device shows that mode and up to a minute after, at most 5 minutes after the command). A mode picked on the device itself does not count as such a switch. Everything else counts as a change on the device, also a device's own weekly program, its frost or window protection setting a setpoint, or an automation writing to the device. Leave the option off for such devices.
-- Like every override, the taken-over target outranks vacation, presence and an empty room, and lifts the outdoor temperature limits while it lasts.
-- After a device was unavailable, or after a room was not controlled for a while (e.g. its area was deleted), the first setpoint it reports is not taken over.
-- While climate control is off for the room or globally, nothing is taken over: RoomMind sends no commands then, the device keeps whatever is set on it.
+## 4. Setpoint Nudge
 
-## Setpoint Mode: Proportional vs Direct
+RoomMind starts and sustains a call by nudging the thermostat's active setpoint **just past its own reading**:
 
-`Setpoint mode` is relevant for thermostat/TRV devices in `Full Control` rooms.
+- **Nudge delta** — how far past the reading the setpoint goes to start a call (default 1.2 °C; 1.0–1.2 on a responsive heat pump, up to 2.0 on a sluggish one). Too small: the thermostat ignores the call or stops it immediately. Too large: the room overshoots before the plan can end the run.
+- **Max headroom** (the safety headroom) — the largest shift away from the Fallback Band, i.e. how far beyond the active room targets the nudge may go. This is what prevents a stuck call from running the furnace flat out. The default is 2.5 °C; keep it modest and never so large that a lost connection leaves an extreme setpoint behind.
+- **Minimum deadband** — also applies to the nudged setpoints: heating and cooling setpoints never come closer than this.
 
-### Proportional
+You should not need to touch the nudge once it works. If a room is consistently a little late, give it its own temperature sensor and let the plan pre-heat earlier rather than raising the nudge — the nudge is a switch, not a thermostat.
 
-RoomMind decides from your room sensor when the room needs heat. While heating, the TRV gets a raised setpoint, in most cases close to its maximum (around `30°C`); a TRV opens its valve fully anyway once its setpoint is a little above its own reading. Once the room sensor shows the target, RoomMind switches the TRV off (or to whatever `When idle` says). So the radiator runs at full power in runs rather than at a steady partial output, and the TRV setpoint does not tell how much heat the room needs. If something else reads the TRV setpoint, for example an automation that sets the flow temperature, use `Direct` for that TRV, or read the valve opening or the `hvac_action` of the room climate entity instead. For a steady partial opening, see [Direct Valve Control](#direct-valve-control-trvs).
+## 5. Plant Guards
 
-Best for:
+`Settings → Central HVAC → Plant guards` protects the equipment:
 
-- radiator valves / TRVs
-- devices that need an exaggerated setpoint to actually deliver heat
+| Setting | What it does | Default | Typical |
+|---|---|---|---|
+| **Minimum run** | Minutes a heating or cooling run must last before it may stop | 10 min | 10–15 min (furnace), 10 min (heat pump) |
+| **Minimum off** | Minutes the plant rests after a conditioning run | 5 min | 5 min |
+| **Minimum fan** | Minutes a Circulation run must last | 10 min | 10–30 min |
+| **Changeover lockout** | Minutes the heat pump rests before reversing between heating and cooling | 30 min | 20–30 min |
 
-### Direct
+Set the minimum run at or above the thermostat's own minimum run time if it has one — otherwise the plan can finish a run and the thermostat can keep it going, or vice versa. Minimum fan matters most: a blower that starts and stops every few minutes is audible and buys nothing.
 
-RoomMind sends the real target temperature and lets the device regulate itself.
+While a guard holds a run, the plant status shows it and the affected rooms report why they are idle. Guards never override a safety decision: an open Exterior Opening or an explicit off still stops the plant.
 
-Best for:
+## 6. Wall-Thermostat Override Adoption
 
-- space heaters
-- pellet stoves
-- devices with their own thermostat logic that should stay in control internally
+`Follow thermostat setpoint` decides what happens when someone turns the setpoint in on the wall thermostat itself:
 
-An AC in `Direct` mode decides itself when its compressor runs. Once a run has started, RoomMind leaves it to the AC to end it, as long as the AC reports that it is still heating or cooling (`hvac_action`): RoomMind does not switch it off just because the room has reached the target, only when the room is 0.5 °C past it or, in `Auto` rooms, reaches the target of the other side. This needs every AC in the room set to `Direct` and, for heating, no TRVs in the room. ACs that report no `hvac_action` are switched off at the target after the minimum run time, as before.
+- **On** — the new setpoint becomes a manual override and is respected for **Override duration** hours (default 2 h). While it lasts, the plant serves it like any other override and no Setpoint Nudge moves it.
+- **Off** — RoomMind treats the thermostat's setpoint as its own and continues nudging; a hand-set value is overwritten with the next cycle.
 
-#### Setpoint offset
+Turn it on for households where people walk up to the thermostat. Turn it off for a thermostat that runs its own program, is written by other automations, or is shared with a landlord's system — RoomMind cannot tell those changes from a hand on the dial.
 
-Some devices measure the room differently than your room sensor, for example an AC mounted near the floor that cools its own sensor. With `Direct` and an external room sensor you can set a `Setpoint offset` (-5 to +5 °C, step 0.5, default 0). It is added to the room target before the target is sent to the device, for heating and cooling alike.
+A manual thermostat change is never price-shifted and outranks vacation, presence away and the schedule, like every override.
 
-- Device reads **colder** than the room: use a **negative** value.
-- Device reads **warmer** than the room: use a **positive** value.
+## 7. Exterior Openings and the Open Window Policy
 
-Example: the room target is 24°C. While cooling, the device thinks the room is 2° colder than it is and switches off too early. Set the offset to `-2`: the device receives 22°C and keeps running until the room is really at 24°C.
+An **Exterior Opening** is a window or exterior door to the outdoors. Configure the sensors per room (`Sensors → Windows and exterior doors`), with open and close delays.
 
-The offset is applied before the device limits (`min_temp`/`max_temp`) and the step rounding, and it is kept for the `Setback` idle action. It has no effect in `Proportional` mode. The field is only offered in rooms with an external room sensor, because Managed rooms have no reference to correct against; an old value stays ignored there. On Fahrenheit systems the field is shown in °F.
+`Settings → Central HVAC → Open window policy` decides how much an open opening matters:
 
-#### Learned sensor offset (ACs)
+| Policy | Behaviour | When to use |
+|---|---|---|
+| **Pause unless door closed** (default) | An open opening pauses the whole plant, *unless* the room's own Interior Door is confirmed closed — then only that room leaves the plan | Homes where a room can be closed off (office, guest room) |
+| **Pause always** | Any open opening pauses the whole plant | Small homes without interior door sensors, or where every room is open to the hallway |
+| **Exclude room only** | The room leaves the plan, the plant keeps running for the others | Homes where windows are opened for a few minutes while the rest of the house is occupied |
 
-An AC regulates on the sensor in its indoor unit. A wall unit under the ceiling often reads the warm layer: warmer than the room sensor while it runs, and warmer still once it stops. RoomMind learns this offset per AC from the device's `current_temperature`, separately for heating, cooling and idle, while the device is switched on and reports that state in `hvac_action` (readings from the first 4 minutes after a start or stop are skipped; a device that is off, or in fan or dry mode, teaches nothing). Once an offset has 10 readings, it is applied in steps of 0.5 °C (an offset below 0.25 °C changes nothing, and the applied step only moves when the learned value has moved clearly), and an AC in `Proportional` mode gets its setpoints in its own frame: the proportional heating and cooling setpoint and the setpoint kept during the compressor min-run use the heating or cooling offset, and the `Setback` idle setpoint uses the idle offset. The device then stops and restarts where the room, not its own sensor, is at the intended temperature.
+An active override always keeps the plant running. After a restart RoomMind waits up to 5 minutes for the sensors to report; a sensor that no longer exists counts as closed with a warning in the log.
 
-This only applies in rooms with an external room sensor and to devices that report `hvac_action`. `Direct` devices keep the offset you set yourself. Offsets beyond ±4 °C are ignored as a misplaced or broken sensor. The learned values are in the diagnostics download (`ac_head_offsets`).
+## 8. Occupancy Modes
 
-#### Upper device limit
+Per room (`Sensors → Occupancy mode`), the mode decides how occupancy drives Room Priority:
 
-In `Proportional` mode the boosted heating setpoint stays one step (`target_temp_step`, 0.5 °C if the device reports none) below the device's `max_temp`, and never below the room target. Some integrations reject exactly their own `max_temp`, which made the Dyson Heat/Cool purifier ignore the 37°C setpoint. The cooling floor (`min_temp`) is unchanged.
+| Mode | Behaviour | Use for |
+|---|---|---|
+| **Reactive + trend** | Uses the motion sensors and the learned Occupancy Trend. An empty room drops to eco after the delay and returns as soon as someone is detected | Living rooms, offices, kitchens |
+| **Assumed while schedule on** | Treats the room as occupied while its schedule is "on", whatever the sensors say; motion only refines it | Bedrooms and nurseries with a PIR that cannot see someone sleeping |
+| **Follow schedule** | Occupancy follows the schedule only; motion sensors are ignored | Rooms with a reliable schedule and no useful sensor |
+| **Guardrail only** | Never assumes occupancy; the room is only kept inside its Guardrail Band | Guest rooms, storage rooms, spare bedrooms |
 
-## Direct Valve Control (TRVs)
+Two more room settings tune the behaviour:
 
-Some TRVs let Home Assistant set the valve opening itself through `number` entities, for example the SONOFF TRVZB in Zigbee2MQTT (`valve_opening_degree` and `valve_closing_degree`). With a setpoint, a TRV opens its valve fully as soon as it wants heat, so the radiator runs at full power in short bursts. With direct valve control RoomMind holds the valve at the opening the room needs, for example 30 %, for as long as it is needed.
+- **Dwell** (`occupancy_dwell_minutes`) — how long motion must persist before the room counts as occupied, and how long a short absence is bridged. The default (3 minutes) is right for most rooms; a hallway or a kitchen benefits from a little more.
+- **Eco delay** (`occupancy_eco_delay`) — how long the room must be empty before it drops to eco. 10–20 minutes avoids reacting to every trip to the kitchen.
 
-To use it, open the TRV in the room's device list and switch on `Direct valve control`. RoomMind finds the opening and closing degree entities of the device itself. Only if it cannot recognise them (for example after renaming the entities), you pick both by hand instead of the switch. The option is only shown in rooms with an external room sensor, for TRVs whose device has `number` entities.
+The Guardrail Band itself (16..28 °C by default) is what protects empty rooms: they never drive comfort cycles, but they never drift to extremes either.
 
-The SONOFF TRV-ZBT (gen2) names its two values differently in Zigbee2MQTT: `heating_valve_position` and `idle_valve_position`. Its second value is not a closing degree but the valve opening while the TRV does not heat. Pick `heating_valve_position` as the opening degree and `idle_valve_position` as the second value, then set `Second value is` to `Opening while idle`. Left at `Closing degree`, the valve stays open whenever the room needs no heat.
+## 9. Interior Doors: Sensor, Delay and Airflow
 
-How it behaves:
+An **Interior Door** is a door between two rooms (`Sensors → Interior door`): the binary sensor that reports it and the delay a changed state must hold before it counts (default 60 s; 30–120 s keeps a door that is briefly opened from flapping the plant).
 
-- While heating, RoomMind sets the opening degree to the heating power and the closing degree to `100 - opening` (with `Opening while idle`: both to the heating power), so the valve stays at that position whatever the TRV's own controller decides. The TRV keeps getting its proportional setpoint as before. The setpoint mode does not apply to these TRVs.
-- In a room that heats only through TRVs with direct valve control (no heat-capable AC that heats along, no underfloor heating), a running room keeps heating at the target with the power that holds it there, instead of stopping and restarting below it. The opening is the share of full heating power the learned room model needs to hold the target (losses minus sun and occupancy), plus 100 % per 1 °C below the target; above the target it drops until the valve closes. A new run still starts only below the start hysteresis, and pre-heating ahead of a schedule block works as for other TRVs. The heating power shown in the room is the opening RoomMind computes; the valve follows it within the limits below.
-- To spare battery and motor noise, a new position goes out only if it differs by at least 5 % and at the earliest 10 minutes after the last move; a changed room target goes out at once.
-- During a boiler min-run hold (compressor group) the valve runs at 15 % right away.
-- When the room stops heating, RoomMind hands the valve back to the TRV: both degrees to 100 % (the device default; with `Opening while idle`: opening 100 %, idle position 0 %, so the valve closes while the TRV does not heat) and the configured idle action switches the TRV off as usual.
-- The valve is also handed back this way when you switch it off (or clear the fields), remove the TRV or the room, switch climate control off, reload or remove the integration, or the room has no external sensor (`Managed` mode). When RoomMind lets go of a heating TRV this way, the TRV also gets the room target as its setpoint, so it works like a normal thermostat again instead of heating on RoomMind's raised setpoint. Degrees you change by hand afterwards stay as you set them until the next restart or reload; to set them yourself for good, switch direct valve control off. While RoomMind controls the valve, a limit you set on the degrees yourself (for example for hydraulic balancing) is overwritten: RoomMind uses the full range.
-- In such a room the valve closes at the latest 0.5 °C above the target. In mixed rooms the valve follows the heating power of the normal on/off rules.
-- During the first days, while the room model learns, RoomMind controls the room with simple on/off rules and the valve opens fully when heating.
+Two things change when a room's Interior Door is reported closed:
 
-A valve does not deliver heat in proportion to its opening: many radiators give most of their output at a small opening. RoomMind learns the room's response at the openings it actually uses.
+- **Policy** — with the default `pause unless door closed`, the room's open window no longer pauses the whole home; the room leaves the plan and the rest of the house keeps heating.
+- **Airflow** — the room's share of the blower's air is throttled on the supply side, and its return path is throttled harder, because a closed door blocks the return-plenum loop. RoomMind learns the resulting slower circulation coupling (`beta_fan`) per room, and the `door_closed_mix_factor` room setting (default 0.40) says how much of the house's air a shut room still sees.
 
-## Idle Behavior: Off, Fan Only, Setback
+Practical guidance:
 
-`When idle` applies to `Climate Device` entries.
+- Mount the door sensor where it reports the *door*, not the frame: a door that is ajar must read open.
+- Give a closed-off room its own heating target that it can reach with the reduced airflow — or leave its door open and let Circulation do the work.
+- Do not use an Interior Door sensor as an Exterior Opening sensor. They answer different questions: "is this room part of the house?" versus "is the envelope open?".
 
-### Turn off
+## 10. Rooms, Sensors and Shades
 
-RoomMind turns the device off, or falls back to the device's minimum/off-like behavior if true off is not supported.
+A room is a **Thermal Zone** as soon as it has its own temperature sensor. Add:
 
-### Fan only
+- **Temperature sensor** (recommended) — unlocks the learned model and predictive control for that room. Without it the room gets targets but no model.
+- **Humidity sensor** — enables Effective Temperature, the dehumidify decision and the mold risk.
+- **Occupancy sensor(s)** — motion or presence, see the modes above.
+- **CO₂ / VOC sensor** — see [Air quality](features.md#air-quality).
+- **Covers** — driven by RoomMind (sun protection, night close, schedules, window hold), and **read-only covers** — manual blinds or numeric position sensors — that are only read for shading and never moved.
 
-RoomMind keeps the device running in fan mode without active heating/cooling.
+## 11. Control Mode and Priority
 
-Useful when you want:
+- `Settings → Control → Control mode` — **Predictive (MPC)** plans the plant with the learned room models. **Simple (on/off)** keeps the plant on hysteresis only; the models keep learning for the analytics, and covers use a simpler solar estimate. Use Simple only while diagnosing a problem.
+- `Settings → Control → Priority` — the Comfort ↔ Efficiency slider. Toward Comfort the plan reacts earlier and works harder to hold the band; toward Efficiency it allows more drift and saves runtime. This does not change schedule targets, overrides, comfort or eco values — only how aggressively the plan chases them.
 
-- air circulation
-- less harsh on/off transitions
+## 12. Troubleshooting the Plant
 
-### Setback
-
-RoomMind keeps the current HVAC mode active, but moves the target away from the room target:
-
-- heating setback = `heat target - 2°C`
-- cooling setback = `cool target + 2°C`
-
-A `Direct` device's own offset and, for ACs, the learned idle sensor offset (see [Learned sensor offset](#learned-sensor-offset-acs)) are added to it.
-
-This lets the device back off instead of shutting off completely, so short pauses between runs don't turn into off/on cycles.
-
-By default the device stays on in setback however long the pause is. With **Turn off after an hour without demand** (below the idle setting) long pauses end in off: once the room has had no heating or cooling demand for an hour, and RoomMind's plan expects no run in the device's mode for the next hour, the device is turned off. When demand returns, RoomMind switches it back on as usual. This needs the predictive control (Full Control with an external sensor and a trained model). In Managed Mode, with `Simple` control, or while the model is still learning, the setback stays until the next run.
-
-Important:
-
-- the setback offset is currently fixed at `2°C`
-- it is **not configurable** in the current UI
-
-## Idle Behavior for Thermostats: Off, Low
-
-`When idle` also applies to `Thermostat` / TRV entries, with different options.
-
-### Turn off
-
-RoomMind sends the TRV to its `off` state.
-
-### Low
-
-RoomMind keeps the TRV in its current heating mode but lowers the setpoint to the device's minimum temperature.
-
-Useful for battery-powered Zigbee TRVs that enter deep sleep when set to `off` and then stop reacting to commands. `Low` keeps the valve responsive while effectively stopping heating.
-
-## Evaporator Drying
-
-`Settings -> Evaporator drying` (with a per-device override in `Devices`) keeps an AC's indoor fan running for a while after cooling stops, before the unit really switches off.
-
-Drying the evaporator coil this way cuts down on biofilm buildup and a musty smell on the next cooling start. It is off by default.
-
-### Turning it on
-
-- Enable it globally in `Settings -> Evaporator drying`.
-- Or override a single device in `Devices`: `Use global setting`, `Always on`, or `Always off`. Only `Climate Device` / AC entries offer this; TRVs have no evaporator coil.
-
-Drying time, the minimum cooling time before a run is worth it, an optional drain delay, drying mode (`fan_only` or `dry`), and fan speed are all configurable, both globally and per device. A device left on its default values falls back to the global setting.
-
-### While it runs
-
-- A returning cooling demand cancels the run immediately and the AC goes straight back to cooling.
-- A returning heating demand cancels it too, and resets the tracked wetness for that room's ACs.
-- A running or draining device shows a badge with the remaining time on the room's status.
-
-### Relation to `When idle`
-
-If a drain delay is configured, a run normally holds the device off first so condensate can drain, then switches to the fan. With `When idle` set to `Setback` the device is never actually off, so the drain step is skipped and the run starts directly in the fan phase.
-
-### Relation to an explicit shutdown
-
-An explicit shutdown, `Action when schedule is off` or `Action when away` set to `Turn off devices`, overrides `When idle` (described in the next section) so a device cannot stay fanning or set back indefinitely. Evaporator drying is different: an explicit shutdown does not block it. A run can start fresh or keep going, and always finishes normally, before the device goes off.
-
-## When "Turn off devices" Overrides `When idle`
-
-`When idle` describes what a device should do while the room simply has no heating or cooling demand. It does **not** apply when you explicitly shut a room down via:
-
-- `Settings → Control → Action when schedule is off` set to `Turn off devices`
-- `Settings → Presence → Action when away` set to `Turn off devices`
-
-In those cases RoomMind turns the devices off even if `When idle` is set to `Fan only` or `Setback`. Otherwise an AC would keep circulating air after the schedule ended.
-
-The single exception is `Low` on thermostats: it stays active because the affected TRVs stop responding after being set to `off`. Lowering the setpoint to the device minimum already stops all heat output.
-
-## Smart Source Selection
-
-`Smart source selection` only appears when a room has:
-
-- at least one `Thermostat` / TRV
-- at least one `Climate Device` / AC
-- an external temperature sensor
-
-In that case RoomMind can decide which source should heat:
-
-- TRV / boiler side
-- AC / heat pump side
-- or both, when the gap is large
-
-It uses temperature gap and outdoor conditions to make that choice.
+| Symptom | Look at |
+|---|---|
+| Plant stays idle although a room is cold | Is the Heating floor below the room's target (and the Cooling ceiling above it)? Is the thermostat entity correct and reporting `hvac_action`? Is the outdoor heating limit (`Settings → Control`) not exceeded? |
+| Plant runs, rooms do not get warm | Airflow: is the room served by the ducts and is its Interior Door reported open? Is its `beta_fan` small because it is throttled? |
+| Short cycling on the furnace or compressor | Raise Minimum run and Minimum off; raise Minimum deadband; check the thermostat's own minimum run time |
+| Room overshoots after a call | Lower Nudge delta, lower Max headroom, or give the room a sensor so pre-heating is planned |
+| VOC/CO₂ remains high with the blower running | Circulation recirculates air; it does not ventilate. Use a dedicated ventilation entity |
+| House feels damp right after cooling | Wet-Coil Lockout too short or Wet-coil max RH too high; see `binary_sensor.roommind_wet_coil_lockout` |
+| Plant pauses whenever a window opens somewhere | Switch the policy to `pause unless door closed` and configure the Interior Door sensors, or use `exclude room only` |
+| A setpoint changed at the wall is overwritten | Turn on `Follow thermostat setpoint` and set the override duration |

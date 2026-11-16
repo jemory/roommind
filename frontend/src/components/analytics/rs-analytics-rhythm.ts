@@ -170,7 +170,11 @@ export class RsAnalyticsRhythm extends LitElement {
     const heat = day.heat[hour];
     const cool = day.cool[hour];
     if (heat == null || cool == null) return null;
-    if (heat === 0 && cool === 0) return "var(--rs-idle)";
+    if (heat === 0 && cool === 0) {
+      // No heating or cooling left the plant circulating only: the mode the panel shows green
+      const circulate = day.circulate?.[hour] ?? 0;
+      return circulate > 0 ? shade("--rs-ok", circulate) : "var(--rs-idle)";
+    }
     return heat >= cool ? shade("--rs-warm", heat) : shade("--rs-cold", cool);
   }
 
@@ -184,9 +188,10 @@ export class RsAnalyticsRhythm extends LitElement {
 
   private _rowTotal(day: RhythmDay, view: RhythmView): string {
     if (view === "activity") {
-      const sum = (values: Array<number | null>) =>
-        values.reduce<number>((a, v) => a + (v ?? 0), 0);
-      const hours = sum(day.heat) + sum(day.cool);
+      const sum = (values: Array<number | null> | undefined) =>
+        (values ?? []).reduce<number>((a, v) => a + (v ?? 0), 0);
+      // Each sample has one mode, so the shares never add up past the hour they cover
+      const hours = sum(day.heat) + sum(day.cool) + sum(day.circulate);
       return hours > 0 ? formatHours(hours, this.language) : "";
     }
     if (day.within == null) return "";
@@ -197,7 +202,8 @@ export class RsAnalyticsRhythm extends LitElement {
   private _renderLegend(view: RhythmView, days: RhythmDay[]) {
     const l = this.language;
     if (view === "activity") {
-      const any = (key: "heat" | "cool" | "window") => days.some((d) => d[key].some((v) => !!v));
+      const any = (key: "heat" | "cool" | "circulate" | "window") =>
+        days.some((d) => (d[key] ?? []).some((v) => !!v));
       return html`<div class="legend">
         ${
           this.canHeat || any("heat")
@@ -207,6 +213,13 @@ export class RsAnalyticsRhythm extends LitElement {
         ${
           this.canCool || any("cool")
             ? html`<span><i class="key cold"></i>${localize("analytics.cooling_period", l)}</span>`
+            : nothing
+        }
+        ${
+          any("circulate")
+            ? html`<span
+                ><i class="key circulate"></i>${localize("analytics.circulating_period", l)}</span
+              >`
             : nothing
         }
         ${
@@ -259,6 +272,7 @@ export class RsAnalyticsRhythm extends LitElement {
     share(localize("analytics.comfort_above", l), day.above[hour]);
     share(localize("analytics.heating_period", l), day.heat[hour]);
     share(localize("analytics.cooling_period", l), day.cool[hour]);
+    share(localize("analytics.circulating_period", l), day.circulate?.[hour] ?? null);
     share(localize("analytics.window_open_period", l), day.window[hour]);
     add(localize("analytics.humidity", l), day.humidity[hour], (v) => formatPercent(v, this.hass));
     add(localize("analytics.outdoor", l), day.outdoor[hour], temp);
@@ -527,6 +541,10 @@ export class RsAnalyticsRhythm extends LitElement {
 
       .key.cold {
         background: var(--rs-cold);
+      }
+
+      .key.circulate {
+        background: var(--rs-ok);
       }
 
       .key.window-key {

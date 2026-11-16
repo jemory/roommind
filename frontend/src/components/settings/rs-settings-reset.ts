@@ -109,7 +109,7 @@ export class RsSettingsReset extends RsSettingsBase {
   private _historyOnly(areaId: string): boolean {
     const room = this.rooms[areaId];
     if (!room) return false;
-    return !!room.is_outdoor || (!room.temperature_sensor && !room.devices?.length);
+    return !!room.is_outdoor || !room.temperature_sensor;
   }
 
   private _confirmKey(areaId: string) {

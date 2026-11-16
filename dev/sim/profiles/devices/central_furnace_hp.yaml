@@ -1,0 +1,38 @@
+description: >
+  North American central forced-air plant (one thermostat for the house): gas furnace
+  heating at a constant output, heat-pump cooling with a wet evaporator coil, and a
+  circulation blower that mixes the rooms the ducts serve. Furnace heat does not derate
+  with outdoor temperature and has no defrost cycle; cooling dehumidifies onto the coil,
+  and running only the fan re-evaporates that film back into the supply air.
+  Set `serves_rooms` and `supply_shares` in the scenario, e.g.
+  `serves_rooms: [office, bedroom]` with
+  `supply_shares: {living_room: 0.45, office: 0.25, bedroom: 0.30}`
+  (defaults to an equal split over the own room plus `serves_rooms`).
+extends: ecobee
+model: central_hvac
+capabilities:
+  hvac_modes: ["off", "heat", "cool", "heat_cool", "fan_only"]
+  fan_modes: ["auto", "on"]
+params:
+  # --- heating: furnace ---------------------------------------------------------------
+  furnace_heating: true
+  heat_capacity_w: 10000        # constant, independent of outdoor temperature
+  furnace_efficiency: 0.95      # fuel-equivalent electric figure (no COP)
+  defrost_interval_s: 0         # a furnace has no outdoor coil, so never a defrost
+  # --- cooling: heat pump -------------------------------------------------------------
+  cool_capacity_w: 7500
+  eer: 3.2
+  shr: 0.72                     # 72 % sensible, the rest condenses on the coil
+  # --- air handler --------------------------------------------------------------------
+  circulation_ach: 2.5          # recirculation over the served rooms while conditioning
+  fan_circulation_ach: 1.8      # the same while only the fan runs
+  blower_w: 400                 # air-handler power while it moves air
+  serves_rooms: []
+  supply_shares: {}             # room -> share of the blower air; empty = equal split
+  # --- evaporator water film (RoomMind's WetCoilTracker) ------------------------------
+  max_coil_water_kg: 0.6        # retained film; the rest drips down the condensate drain
+  coil_evap_tau_s: 600          # wet-coil re-evaporation into the duct while circulating
+  coil_drain_tau_s: 1500        # passive drain into the pan while the blower stands still
+  # --- interior doors -----------------------------------------------------------------
+  door_closed_return_factor: 0.35   # a shut room's share of the return-plenum loop
+  door_closed_supply_factor: 0.75   # and of the duct supply

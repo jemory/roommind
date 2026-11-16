@@ -6,7 +6,7 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from homeassistant.components.climate import ClimateEntityFeature, HVACMode
+from homeassistant.components.climate import ClimateEntityFeature, HVACAction, HVACMode
 from homeassistant.const import UnitOfTemperature
 
 from custom_components.roommind.climate import (
@@ -454,6 +454,29 @@ async def test_turn_off_on_pending_seed_still_clears_and_refreshes(mock_coordina
 
     coordinator.clear_override_seed.assert_called_once_with("living_room")
     coordinator.async_request_refresh.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("live_mode", "expected"),
+    [
+        ("heating", HVACAction.HEATING),
+        ("cooling", HVACAction.COOLING),
+        ("circulating", HVACAction.FAN),
+        ("idle", HVACAction.IDLE),
+        (None, HVACAction.IDLE),
+    ],
+)
+def test_override_entity_hvac_action_follows_the_plant(mock_coordinator, live_mode, expected):
+    """The deprecated entity mirrors what the Central Plant is doing for its room."""
+    coordinator, _ = mock_coordinator
+    coordinator.data = {"rooms": {"living_room": {"mode": live_mode}}}
+    assert RoomMindOverrideClimate(coordinator, "living_room").hvac_action == expected
+
+
+def test_override_entity_hvac_action_without_live_data(mock_coordinator):
+    coordinator, _ = mock_coordinator
+    coordinator.data = {"rooms": {}}
+    assert RoomMindOverrideClimate(coordinator, "living_room").hvac_action == HVACAction.IDLE
 
 
 def test_hvac_mode_off_when_room_missing(mock_coordinator):

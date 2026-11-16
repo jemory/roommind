@@ -353,3 +353,49 @@ async def test_global_climate_control_switch_saves_the_setting(mock_vacation_coo
     await (switch.async_turn_on() if turn_on else switch.async_turn_off())
     store.async_save_settings.assert_awaited_once_with({"climate_control_active": value})
     coordinator.async_request_refresh.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Central HVAC: the switch platform stays on the v2 store only
+# ---------------------------------------------------------------------------
+
+
+def test_switch_platform_has_no_legacy_device_dependencies():
+    """No valve, device or compressor module feeds the switches: the plant owns the hardware."""
+    import inspect
+
+    from custom_components.roommind import switch as switch_module
+
+    source = inspect.getsource(switch_module)
+    for legacy in (
+        "direct_valve",
+        "device_utils",
+        "compressor_group_manager",
+        "valve_manager",
+        "mpc_controller",
+        "heat_source_orchestrator",
+    ):
+        assert legacy not in source
+
+
+@pytest.mark.asyncio
+async def test_switches_work_with_the_v2_store(store):
+    """The switches read and write the v2 room/settings payload (central_plant included)."""
+    await store.async_load()
+    await store.async_save_room("living", {"covers": ["cover.blinds"], "covers_auto_enabled": True})
+    await store.async_save_settings({"central_plant": {"thermostat_entity": "climate.central"}})
+
+    coordinator = MagicMock()
+    coordinator.hass = MagicMock()
+    coordinator.hass.data = {DOMAIN: {"store": store}}
+    coordinator.async_request_refresh = AsyncMock()
+
+    assert RoomMindCoverAutoSwitch(coordinator, "living").is_on is True
+    assert RoomMindClimateControlSwitch(coordinator, "living").is_on is True
+    assert RoomMindGlobalClimateControlSwitch(coordinator).is_on is True
+    assert RoomMindVacationSwitch(coordinator).is_on is False
+
+    await RoomMindCoverAutoSwitch(coordinator, "living").async_turn_off()
+    assert store.get_room("living")["covers_auto_enabled"] is False
+    # The Central Plant block is untouched by a switch write
+    assert store.get_settings()["central_plant"]["thermostat_entity"] == "climate.central"

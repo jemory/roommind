@@ -1,11 +1,11 @@
 import { LitElement, html, css, nothing, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import type { HomeAssistant, HassArea, RoomLiveData } from "../types";
+import type { HomeAssistant, HassArea, OccupancyMode, RoomLiveData } from "../types";
 import { getEntitiesForArea } from "../utils/room-state";
-import { localize } from "../utils/localize";
+import { localize, type TranslationKey } from "../utils/localize";
 import { openEntityInfo } from "../utils/events";
 import { tempUnit } from "../utils/temperature";
-import { formatMinutes, formatNumber, formatPercent } from "../utils/format";
+import { formatNumber, formatPercent } from "../utils/format";
 import { tokens } from "../styles/tokens";
 import { inputStyles } from "../styles/input-styles";
 import { formStyles } from "../styles/form-styles";
@@ -13,7 +13,11 @@ import {
   DEFAULT_CO2_THRESHOLD,
   DEFAULT_OCCUPANCY_ECO_DELAY,
   MAX_CO2_THRESHOLD,
+  MAX_INTERIOR_DOOR_DELAY,
+  MAX_OCCUPANCY_DWELL_MINUTES,
   MIN_CO2_THRESHOLD,
+  MIN_INTERIOR_DOOR_DELAY,
+  MIN_OCCUPANCY_DWELL_MINUTES,
   MIN_OCCUPANCY_ECO_DELAY,
 } from "../utils/constants";
 import "./shared/rs-field";
@@ -21,12 +25,15 @@ import "./shared/rs-number-field";
 import "./shared/rs-icon-button";
 import "./shared/rs-info-icon";
 import "./shared/rs-list-row";
+import "./shared/rs-segmented";
 
-type SensorKind = "temp" | "humidity" | "occupancy" | "window" | "co2" | "voc" | "ventilation";
+type SensorKind =
+  "temp" | "humidity" | "occupancy" | "window" | "interior_door" | "co2" | "voc" | "ventilation";
 type SingleKind = "temp" | "humidity" | "co2" | "voc" | "ventilation";
 
 const OCCUPANCY_CLASSES = ["occupancy", "motion", "presence"];
 const WINDOW_CLASSES = ["window", "door", "opening"];
+const DOOR_CLASSES = ["door", "opening"];
 // VOC sensors report an index, ppb or µg/m³; ESPHome's SGP4x index comes as aqi or without a class
 const VOC_CLASSES = ["volatile_organic_compounds", "volatile_organic_compounds_parts", "aqi"];
 const VENTILATION_DOMAINS = ["fan", "switch", "input_boolean"];
@@ -38,6 +45,27 @@ const SINGLE_KEYS: Record<SingleKind, string> = {
   ventilation: "ventilation_entity",
 };
 
+const OCCUPANCY_MODES: OccupancyMode[] = [
+  "reactive_and_trend",
+  "schedule_assumed_when_on",
+  "follow_schedule",
+  "guardrail_only",
+];
+
+const OCCUPANCY_MODE_KEYS: Record<OccupancyMode, TranslationKey> = {
+  reactive_and_trend: "sensors.occupancy_mode.reactive_and_trend",
+  schedule_assumed_when_on: "sensors.occupancy_mode.schedule_assumed_when_on",
+  follow_schedule: "sensors.occupancy_mode.follow_schedule",
+  guardrail_only: "sensors.occupancy_mode.guardrail_only",
+};
+
+const OCCUPANCY_MODE_INFO: Record<OccupancyMode, TranslationKey> = {
+  reactive_and_trend: "sensors.occupancy_mode_info.reactive_and_trend",
+  schedule_assumed_when_on: "sensors.occupancy_mode_info.schedule_assumed_when_on",
+  follow_schedule: "sensors.occupancy_mode_info.follow_schedule",
+  guardrail_only: "sensors.occupancy_mode_info.guardrail_only",
+};
+
 @customElement("rs-sensor-section")
 export class RsSensorSection extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
@@ -45,11 +73,15 @@ export class RsSensorSection extends LitElement {
   @property({ type: String }) public temperatureSensor = "";
   @property({ type: String }) public humiditySensor = "";
   @property({ attribute: false }) public occupancySensors: Set<string> = new Set();
-  @property({ type: Boolean }) public occupancyEcoEnabled = false;
+  @property({ type: String }) public occupancyMode: OccupancyMode = "reactive_and_trend";
+  @property({ type: Number }) public occupancyDwellMinutes = 3;
   @property({ type: Number }) public occupancyEcoDelay = DEFAULT_OCCUPANCY_ECO_DELAY;
-  @property({ attribute: false }) public windowSensors: Set<string> = new Set();
+  @property({ attribute: false }) public exteriorWindowSensors: Set<string> = new Set();
   @property({ type: Number }) public windowOpenDelay = 0;
   @property({ type: Number }) public windowCloseDelay = 0;
+  @property({ attribute: false }) public interiorDoorSensors: Set<string> = new Set();
+  @property({ type: Number }) public interiorDoorDelay = 60;
+  @property({ type: Number }) public doorClosedMixFactor = 0.4;
   @property({ type: String }) public co2Sensor = "";
   @property({ type: Number }) public co2Threshold = DEFAULT_CO2_THRESHOLD;
   @property({ type: String }) public vocSensor = "";
@@ -57,7 +89,6 @@ export class RsSensorSection extends LitElement {
   @property({ type: String }) public ventilationEntity = "";
   /** Live state of the room: air quality judgement and whether RoomMind runs the ventilation. */
   @property({ attribute: false }) public live?: RoomLiveData;
-  @property({ type: String }) public heatingSystemType = "";
   @property({ type: Boolean }) public editing = false;
   /** Outdoor area: only temperature and humidity, nothing that controls. */
   @property({ type: Boolean }) public outdoor = false;
@@ -133,10 +164,21 @@ export class RsSensorSection extends LitElement {
         ? `${localize("devices.window_close_delay", l)}: ${this.windowCloseDelay} s`
         : "",
     ].filter(Boolean);
+    const doorNote = [
+      this.interiorDoorDelay
+        ? `${localize("sensors.interior_door_delay", l)}: ${this.interiorDoorDelay} s`
+        : "",
+      `${localize("sensors.door_closed_mix_factor", l)}: ${formatPercent(
+        this.doorClosedMixFactor * 100,
+        this.hass,
+      )}`,
+    ]
+      .filter(Boolean)
+      .join(" · ");
     const occupancyNote =
-      this.occupancyEcoEnabled && this.occupancySensors.size > 0
-        ? localize("devices.occupancy_eco_view", l, {
-            time: formatMinutes(this.occupancyEcoDelay, l),
+      this.occupancySensors.size > 0
+        ? localize("sensors.occupancy_mode_view", l, {
+            mode: localize(OCCUPANCY_MODE_KEYS[this.occupancyMode], l),
           })
         : "";
 
@@ -173,7 +215,7 @@ export class RsSensorSection extends LitElement {
             )
           : nothing
       }
-      ${this.outdoor ? nothing : this._renderControlRows(delays, occupancyNote)}
+      ${this.outdoor ? nothing : this._renderControlRows(delays, doorNote, occupancyNote)}
       ${this.outdoor ? nothing : this._renderAirRows()}
       <rs-list-row
         clickable
@@ -186,11 +228,11 @@ export class RsSensorSection extends LitElement {
     `;
   }
 
-  /** Window and occupancy rows; they only matter where RoomMind controls. */
-  private _renderControlRows(delays: string[], occupancyNote: string) {
+  /** Exterior openings, interior doors and occupancy; they only matter where RoomMind controls. */
+  private _renderControlRows(delays: string[], doorNote: string, occupancyNote: string) {
     const l = this.hass.language;
     return html`
-      ${[...this.windowSensors].map((id) => {
+      ${[...this.exteriorWindowSensors].map((id) => {
         const open = this.hass.states[id]?.state === "on";
         return this._row(
           id,
@@ -198,6 +240,16 @@ export class RsSensorSection extends LitElement {
           [localize("detail.sensors.window", l), ...delays].join(" · "),
           this._binaryValue(id, "detail.sensors.open", "detail.sensors.closed"),
           open ? "var(--rs-warn)" : "",
+        );
+      })}
+      ${[...this.interiorDoorSensors].map((id) => {
+        const open = this.hass.states[id]?.state === "on";
+        return this._row(
+          id,
+          open ? "mdi:door-open" : "mdi:door-closed",
+          [localize("detail.sensors.interior_door", l), doorNote].join(" · "),
+          this._binaryValue(id, "detail.sensors.open", "detail.sensors.closed"),
+          open ? "" : "var(--rs-ok)",
         );
       })}
       ${[...this.occupancySensors].map((id) => {
@@ -354,7 +406,8 @@ export class RsSensorSection extends LitElement {
       "temperatureSensor",
       "humiditySensor",
       "occupancySensors",
-      "windowSensors",
+      "exteriorWindowSensors",
+      "interiorDoorSensors",
       "co2Sensor",
       "vocSensor",
       "ventilationEntity",
@@ -392,6 +445,8 @@ export class RsSensorSection extends LitElement {
         );
       case "window":
         return domain === "binary_sensor" && WINDOW_CLASSES.includes(dc ?? "");
+      case "interior_door":
+        return domain === "binary_sensor" && DOOR_CLASSES.includes(dc ?? "");
       case "co2":
         return domain === "sensor" && dc === "carbon_dioxide";
       case "voc":
@@ -414,11 +469,15 @@ export class RsSensorSection extends LitElement {
   }
 
   private _assigned(kind: SensorKind): string[] {
-    if (kind === "occupancy" || kind === "window") {
-      return [...(kind === "occupancy" ? this.occupancySensors : this.windowSensors)];
-    }
+    if (kind === "occupancy") return [...this.occupancySensors];
+    if (kind === "window") return [...this.exteriorWindowSensors];
+    if (kind === "interior_door") return [...this.interiorDoorSensors];
     const id = this._single(kind);
     return id ? [id] : [];
+  }
+
+  private _isListKind(kind: SensorKind): boolean {
+    return kind === "occupancy" || kind === "window" || kind === "interior_door";
   }
 
   private _renderEditMode() {
@@ -446,7 +505,18 @@ export class RsSensorSection extends LitElement {
       ${
         this.outdoor
           ? nothing
-          : html`${this._renderKind("window", inArea("window"), this._renderWindowSettings(l))}
+          : html`${this._renderKind(
+              "window",
+              inArea("window"),
+              this._renderWindowSettings(l),
+              html`<p class="note">${localize("sensors.exterior_windows_note", l)}</p>`,
+            )}
+            ${this._renderKind(
+              "interior_door",
+              inArea("interior_door"),
+              this._renderInteriorDoorSettings(l),
+              html`<p class="note">${localize("sensors.interior_doors_note", l)}</p>`,
+            )}
             ${this._renderKind("occupancy", inArea("occupancy"), this._renderOccupancySettings(l))}
             ${this._renderKind("co2", inArea("co2"), this._renderCo2Settings(l))}
             ${this._renderKind("voc", inArea("voc"), this._renderVocSettings(l))}
@@ -499,6 +569,12 @@ export class RsSensorSection extends LitElement {
           title: "detail.sensors.window",
           info: "sensors.window_info",
         } as const;
+      case "interior_door":
+        return {
+          icon: "mdi:door-closed",
+          title: "detail.sensors.interior_door",
+          info: "sensors.interior_door_info",
+        } as const;
       case "occupancy":
         return {
           icon: "mdi:motion-sensor",
@@ -535,7 +611,7 @@ export class RsSensorSection extends LitElement {
     const l = this.hass.language;
     const meta = this._kindMeta(kind);
     const assigned = this._assigned(kind);
-    const single = kind !== "occupancy" && kind !== "window";
+    const single = !this._isListKind(kind);
     const suggestions = areaCandidates.filter((id) => !assigned.includes(id));
     return html`<section class="group" data-kind=${kind}>
       <h4 class="group-title">
@@ -579,13 +655,25 @@ export class RsSensorSection extends LitElement {
     const name = this._entityName(entityId);
     const on = this.hass.states[entityId]?.state === "on";
     const color =
-      kind === "window" && on ? "var(--rs-warn)" : kind === "occupancy" && on ? "var(--rs-ok)" : "";
+      kind === "window" && on
+        ? "var(--rs-warn)"
+        : kind === "interior_door"
+          ? on
+            ? ""
+            : "var(--rs-ok)"
+          : kind === "occupancy" && on
+            ? "var(--rs-ok)"
+            : "";
     const icon =
       kind === "window"
         ? on
           ? "mdi:window-open-variant"
           : "mdi:window-closed-variant"
-        : this._kindMeta(kind).icon;
+        : kind === "interior_door"
+          ? on
+            ? "mdi:door-open"
+            : "mdi:door-closed"
+          : this._kindMeta(kind).icon;
     return html`<rs-list-row
       single-line
       .icon=${icon}
@@ -637,6 +725,7 @@ export class RsSensorSection extends LitElement {
       humidity: ["sensor", "input_number"],
       occupancy: ["binary_sensor", "input_boolean"],
       window: ["binary_sensor"],
+      interior_door: ["binary_sensor"],
       co2: ["sensor"],
       voc: ["sensor"],
       ventilation: VENTILATION_DOMAINS,
@@ -674,9 +763,10 @@ export class RsSensorSection extends LitElement {
     if (kind === "humidity") return this._humidityValue(entityId);
     if (kind === "co2" || kind === "voc") return this._numberValue(entityId);
     if (kind === "ventilation") return this._onOffValue(entityId);
-    return kind === "window"
-      ? this._binaryValue(entityId, "detail.sensors.open", "detail.sensors.closed")
-      : this._binaryValue(entityId, "detail.sensors.occupied", "detail.sensors.free");
+    if (kind === "window" || kind === "interior_door") {
+      return this._binaryValue(entityId, "detail.sensors.open", "detail.sensors.closed");
+    }
+    return this._binaryValue(entityId, "detail.sensors.occupied", "detail.sensors.free");
   }
 
   private _entityName(entityId: string): string {
@@ -696,55 +786,91 @@ export class RsSensorSection extends LitElement {
     return html`<p class="note">${localize(key, l)}</p>`;
   }
 
+  /** Exterior openings: open/close delays on top of the sensor list. */
   private _renderWindowSettings(l: string) {
-    if (this.windowSensors.size === 0) return nothing;
-    return html`
-      <div class="pair">
-        <rs-number-field
-          .label=${localize("devices.window_open_delay", l)}
-          .info=${localize("sensors.window_open_delay_info", l)}
-          suffix="s"
-          .min=${0}
-          .value=${this.windowOpenDelay}
-          @value-changed=${(e: CustomEvent<{ value: number }>) =>
-            this._fireSensorChanged("window_open_delay", e.detail.value)}
-        ></rs-number-field>
-        <rs-number-field
-          .label=${localize("devices.window_close_delay", l)}
-          .info=${localize("sensors.window_close_delay_info", l)}
-          suffix="s"
-          .min=${0}
-          .value=${this.windowCloseDelay}
-          @value-changed=${(e: CustomEvent<{ value: number }>) =>
-            this._fireSensorChanged("window_close_delay", e.detail.value)}
-        ></rs-number-field>
-      </div>
-      ${
-        this.heatingSystemType === "underfloor" && this.windowOpenDelay < 300
-          ? html`<p class="note warn">
-              <ha-icon icon="mdi:information-outline" aria-hidden="true"></ha-icon>
-              <span>${localize("devices.underfloor_delay_hint", l)}</span>
-            </p>`
-          : nothing
-      }
-    `;
+    if (this.exteriorWindowSensors.size === 0) return nothing;
+    return html`<div class="pair">
+      <rs-number-field
+        .label=${localize("devices.window_open_delay", l)}
+        .info=${localize("sensors.window_open_delay_info", l)}
+        suffix="s"
+        .min=${0}
+        .value=${this.windowOpenDelay}
+        @value-changed=${(e: CustomEvent<{ value: number }>) =>
+          this._fireSensorChanged("window_open_delay", e.detail.value)}
+      ></rs-number-field>
+      <rs-number-field
+        .label=${localize("devices.window_close_delay", l)}
+        .info=${localize("sensors.window_close_delay_info", l)}
+        suffix="s"
+        .min=${0}
+        .value=${this.windowCloseDelay}
+        @value-changed=${(e: CustomEvent<{ value: number }>) =>
+          this._fireSensorChanged("window_close_delay", e.detail.value)}
+      ></rs-number-field>
+    </div>`;
   }
 
+  /** Interior doors: how long a changed door counts and how much a closed door decouples. */
+  private _renderInteriorDoorSettings(l: string) {
+    if (this.interiorDoorSensors.size === 0) return nothing;
+    return html`<div class="pair">
+      <rs-number-field
+        .label=${localize("sensors.interior_door_delay", l)}
+        .info=${localize("sensors.interior_door_delay_info", l)}
+        suffix="s"
+        .min=${MIN_INTERIOR_DOOR_DELAY}
+        .max=${MAX_INTERIOR_DOOR_DELAY}
+        .value=${this.interiorDoorDelay}
+        @value-changed=${(e: CustomEvent<{ value: number }>) =>
+          this._fireSensorChanged("interior_door_delay", e.detail.value)}
+      ></rs-number-field>
+      <rs-number-field
+        .label=${localize("sensors.door_closed_mix_factor", l)}
+        .info=${localize("sensors.door_closed_mix_factor_info", l)}
+        suffix="%"
+        .min=${0}
+        .max=${100}
+        .step=${5}
+        .value=${Math.round(this.doorClosedMixFactor * 100)}
+        @value-changed=${(e: CustomEvent<{ value: number }>) =>
+          this._fireSensorChanged("door_closed_mix_factor", e.detail.value / 100)}
+      ></rs-number-field>
+    </div>`;
+  }
+
+  /** Occupancy interpretation: mode, dwell and the eco drop delay. */
   private _renderOccupancySettings(l: string) {
     if (this.occupancySensors.size === 0) return nothing;
+    const mode = this.occupancyMode;
     return html`
-      <rs-list-row
-        switch
-        wrap
-        .heading=${localize("devices.occupancy_eco", l)}
-        .checked=${this.occupancyEcoEnabled}
-        @toggle-changed=${(e: CustomEvent<boolean>) =>
-          this._fireSensorChanged("occupancy_eco_enabled", e.detail)}
-      >
-        <rs-info-icon slot="end" .text=${localize("sensors.occupancy_eco_info", l)}></rs-info-icon>
-      </rs-list-row>
+      <div class="mode">
+        <div class="mode-label">${localize("sensors.occupancy_mode", l)}</div>
+        <rs-segmented
+          wrap
+          .label=${localize("sensors.occupancy_mode", l)}
+          .options=${OCCUPANCY_MODES.map((m) => ({
+            value: m,
+            label: localize(OCCUPANCY_MODE_KEYS[m], l),
+          }))}
+          .value=${mode}
+          @value-changed=${(e: CustomEvent<{ value: string }>) =>
+            this._fireSensorChanged("occupancy_mode", e.detail.value)}
+        ></rs-segmented>
+        <p class="note">${localize(OCCUPANCY_MODE_INFO[mode], l)}</p>
+      </div>
+      <rs-number-field
+        .label=${localize("sensors.occupancy_dwell", l)}
+        .info=${localize("sensors.occupancy_dwell_info", l)}
+        suffix="min"
+        .min=${MIN_OCCUPANCY_DWELL_MINUTES}
+        .max=${MAX_OCCUPANCY_DWELL_MINUTES}
+        .value=${this.occupancyDwellMinutes}
+        @value-changed=${(e: CustomEvent<{ value: number }>) =>
+          this._fireSensorChanged("occupancy_dwell_minutes", e.detail.value)}
+      ></rs-number-field>
       ${
-        this.occupancyEcoEnabled
+        mode === "reactive_and_trend"
           ? html`<rs-number-field
               .label=${localize("devices.occupancy_eco_delay", l)}
               .info=${localize("sensors.occupancy_eco_delay_info", l)}
@@ -760,19 +886,27 @@ export class RsSensorSection extends LitElement {
     `;
   }
 
-  /** Occupancy and window hold a list, every other kind one entity (a new one replaces it). */
+  /** Occupancy and the opening lists hold many entities; every other kind holds one. */
   private _add(kind: SensorKind, entityId: string) {
     this._pickerFor = null;
     this._focusKind = kind;
-    if (kind === "occupancy") this._onOccupancyToggle(entityId, true);
-    else if (kind === "window") this._onWindowToggle(entityId, true);
+    if (kind === "occupancy")
+      this._onMultiToggle("occupancy_sensors", this.occupancySensors, entityId, true);
+    else if (kind === "window")
+      this._onMultiToggle("exterior_window_sensors", this.exteriorWindowSensors, entityId, true);
+    else if (kind === "interior_door")
+      this._onMultiToggle("interior_door_sensors", this.interiorDoorSensors, entityId, true);
     else this._onSensorSelected(entityId, kind);
   }
 
   private _remove(kind: SensorKind, entityId: string) {
     this._focusKind = kind;
-    if (kind === "occupancy") this._onOccupancyToggle(entityId, false);
-    else if (kind === "window") this._onWindowToggle(entityId, false);
+    if (kind === "occupancy")
+      this._onMultiToggle("occupancy_sensors", this.occupancySensors, entityId, false);
+    else if (kind === "window")
+      this._onMultiToggle("exterior_window_sensors", this.exteriorWindowSensors, entityId, false);
+    else if (kind === "interior_door")
+      this._onMultiToggle("interior_door_sensors", this.interiorDoorSensors, entityId, false);
     else this._onSensorSelected("", kind);
   }
 
@@ -787,26 +921,13 @@ export class RsSensorSection extends LitElement {
     );
   }
 
-  private _onOccupancyToggle(entityId: string, checked: boolean) {
-    const next = new Set(this.occupancySensors);
+  private _onMultiToggle(key: string, current: Set<string>, entityId: string, checked: boolean) {
+    const next = new Set(current);
     if (checked) next.add(entityId);
     else next.delete(entityId);
     this.dispatchEvent(
       new CustomEvent("sensor-changed", {
-        detail: { key: "occupancy_sensors", value: [...next] },
-        bubbles: true,
-        composed: true,
-      }),
-    );
-  }
-
-  private _onWindowToggle(entityId: string, checked: boolean) {
-    const next = new Set(this.windowSensors);
-    if (checked) next.add(entityId);
-    else next.delete(entityId);
-    this.dispatchEvent(
-      new CustomEvent("sensor-changed", {
-        detail: { key: "window_sensors", value: [...next] },
+        detail: { key, value: [...next] },
         bubbles: true,
         composed: true,
       }),
@@ -849,7 +970,7 @@ export class RsSensorSection extends LitElement {
     ></rs-number-field>`;
   }
 
-  private _fireSensorChanged(key: string, value: boolean | number | null) {
+  private _fireSensorChanged(key: string, value: boolean | number | string | null) {
     this.dispatchEvent(
       new CustomEvent("sensor-changed", {
         detail: { key, value },

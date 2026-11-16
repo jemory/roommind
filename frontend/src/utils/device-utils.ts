@@ -1,61 +1,12 @@
 /**
- * Shared device utilities for the unified device model.
- * Mirrors backend logic from custom_components/roommind/utils/device_utils.py.
+ * Shared thermostat/entity helpers for the Central Plant.
+ *
+ * The Central HVAC schema owns the hardware through a single Central Thermostat, so the
+ * per-room device model (TRVs and ACs) is gone; what remains here is the fan-mode naming
+ * shared by the settings pages.
  */
 
-import type { ClimateMode, DeviceConfig, HassEntity, HomeAssistant } from "../types";
-
-const HST_PRIORITY: Record<string, number> = { underfloor: 2, radiator: 1, "": 0 };
-
-/**
- * Resolve room-level heating_system_type from devices.
- * Most conservative type wins (longest residual heat tau).
- * Only TRV devices are considered.
- */
-export function resolveHeatingSystemType(devices: DeviceConfig[]): string {
-  let best = "";
-  for (const d of devices) {
-    if (d.type !== "trv") continue;
-    const hst = d.heating_system_type ?? "";
-    if ((HST_PRIORITY[hst] ?? 0) > (HST_PRIORITY[best] ?? 0)) best = hst;
-  }
-  return best;
-}
-
-export interface DeviceAbilities {
-  heat: boolean;
-  cool: boolean;
-  /** Thermostats and climate devices in the same room. */
-  mixed: boolean;
-}
-
-/** What the room's devices can do; a device without known hvac_modes counts as able. */
-export function deviceAbilities(
-  devices: DeviceConfig[],
-  hass: Pick<HomeAssistant, "states">,
-): DeviceAbilities {
-  const can = (eid: string, wanted: string[]) => {
-    const m = hass.states[eid]?.attributes?.hvac_modes;
-    return !Array.isArray(m) || (m as string[]).some((x) => wanted.includes(x));
-  };
-  const trvs = devices.filter((d) => d.type === "trv");
-  const acs = devices.filter((d) => d.type === "ac");
-  return {
-    heat: trvs.length > 0 || acs.some((d) => can(d.entity_id, ["heat", "heat_cool", "auto"])),
-    cool: acs.some((d) => can(d.entity_id, ["cool", "heat_cool", "auto"])),
-    mixed: trvs.length > 0 && acs.length > 0,
-  };
-}
-
-/** Whether the devices can run a climate mode; a room without devices fits every mode. */
-export function modeFits(
-  mode: ClimateMode,
-  devices: DeviceConfig[],
-  ability: DeviceAbilities,
-): boolean {
-  if (devices.length === 0 || mode === "auto") return true;
-  return mode === "heat_only" ? ability.heat : ability.cool;
-}
+import type { HassEntity, HomeAssistant } from "../types";
 
 export interface FanModeOption {
   value: string;
@@ -69,4 +20,23 @@ export interface FanModeOption {
 export function fanModeLabel(hass: HomeAssistant, mode: string, stateObj?: HassEntity): string {
   const st = stateObj ?? { entity_id: "climate.roommind_fan_mode", state: "", attributes: {} };
   return hass.formatEntityAttributeValue?.(st, "fan_mode", mode) || mode;
+}
+
+/**
+ * The fan modes a climate entity reports, translated, in the order the integration lists them.
+ * Falls back to the shared `off`/`low`/`medium`/`high` guesses when the entity has no
+ * `fan_modes` attribute yet (the user may not have a thermostat configured).
+ */
+export function thermostatFanModes(hass: HomeAssistant, entityId: string): FanModeOption[] {
+  const st = entityId ? hass.states[entityId] : undefined;
+  const raw = (st?.attributes?.fan_modes ?? []) as string[];
+  const modes = raw.length ? raw : ["off", "low", "medium", "high", "auto"];
+  const seen = new Set<string>();
+  const options: FanModeOption[] = [];
+  for (const mode of modes) {
+    if (seen.has(mode)) continue;
+    seen.add(mode);
+    options.push({ value: mode, label: fanModeLabel(hass, mode, st) });
+  }
+  return options;
 }

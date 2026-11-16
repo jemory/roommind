@@ -24,12 +24,10 @@ import "./analytics/rs-analytics-model";
 function roomFlags(room: RoomConfig | undefined) {
   return {
     canHeat: room?.climate_mode !== "cool_only",
-    canCool:
-      room?.climate_mode !== "heat_only" && (room?.devices ?? []).some((d) => d.type === "ac"),
+    canCool: room?.climate_mode !== "heat_only",
     hasWindowSensor: (room?.window_sensors?.length ?? 0) > 0,
     // The price only matters where it moves something
-    followsPrice:
-      !room?.is_outdoor && ((room?.price_shift ?? 0) > 0 || !!room?.heat_source_price_aware),
+    followsPrice: !room?.is_outdoor && (room?.price_shift ?? 0) > 0,
   };
 }
 

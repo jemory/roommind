@@ -1,32 +1,43 @@
 name: climate-control-disabled
 description: >
-  Global climate control off: RoomMind only observes (and learns), it must not send a
-  single command to the devices (#36, #74, #365).
+  Global climate control off in a house with one Central Plant: RoomMind only observes (and
+  learns), it must not send a single command to the Central Thermostat (#36, #74, #365). The
+  thermostat was set by hand and keeps running the furnace on its own.
 refs: [36, 74, 365]
-tags: [settings]
+tags: [settings, central-plant]
 start: 2026-01-12T00:00
 duration: 2d
-location: {latitude: 52.5, longitude: 13.4, time_zone: Europe/Berlin}
+location: {latitude: 40.7, longitude: -74.0, time_zone: America/New_York, unit_system: us_customary, country: US}
 weather: {profile: temperate}
 house:
-  building: bestand_teilsaniert
-  outdoor: {sensors: {temperature: sensor.aussen_temp}}
+  building: us_wood_frame
+  outdoor: {sensors: {temperature: sensor.outdoor_temp}}
   rooms:
-    wohnzimmer:
-      floor_area_m2: 22
+    living_room:
+      name: Living room
+      floor_area_m2: 30
+      exterior_wall_m2: 18
       initial: {temperature: 19.0}
-      devices: [{entity_id: climate.wz_trv, profile: generic_trv, initial_mode: heat, initial_target_c: 21}]
-      sensors: {temperature: {entity_id: sensor.wz_temp}}
+      windows: [{orientation: S, area_m2: 3}]
+      devices:
+        - {entity_id: climate.central_hvac, profile: central_furnace_hp, heat_capacity_w: 7000, initial_mode: heat, initial_target_c: 21}
+      sensors: {temperature: {entity_id: sensor.living_room_temp}}
 roommind:
   settings:
-    outdoor_temp_sensor: sensor.aussen_temp
+    outdoor_temp_sensor: sensor.outdoor_temp
     climate_control_active: false
+    central_plant:
+      thermostat_entity: climate.central_hvac
+      fallback_heat_c: 16.5
+      fallback_cool_c: 27.0
+      exterior_open_policy: pause_unless_door_closed
   rooms:
-    wohnzimmer:
-      devices: [{entity_id: climate.wz_trv, type: trv, heating_system_type: radiator}]
-      temperature_sensor: sensor.wz_temp
+    living_room:
+      temperature_sensor: sensor.living_room_temp
       climate_mode: heat_only
-      comfort_temp: 21.0
+      comfort_heat: 21.0
+      eco_heat: 17.0
 expect:
   - {invariant: no_commands_when_climate_off}
-  - {check: "true_temp('wohnzimmer') > 20.0", at: "+1d", label: TRV keeps heating on its own}
+  - {invariant: no_rejected_commands}
+  - {check: "true_temp('living_room') > 20.0", at: "+1d", label: the hand-set thermostat keeps heating on its own}

@@ -14,16 +14,30 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class EkfTrainingManager:
-    """Manages EKF training accumulation and batched updates per room."""
+    """Manages EKF training accumulation and batched updates per room.
+
+    One batch is everything between two flushes: either ``EKF_UPDATE_MIN_DT``
+    minutes of the same mode, a mode change, a window opening, or an
+    unobservable step.  The batch is handed to the EKF as time-weighted means,
+    because values that vary within the batch (power fraction, forced-air
+    charge, house temperature, door coupling) would otherwise be represented by
+    their value at flush time only.
+    """
 
     def __init__(self, model_manager: RoomModelManager) -> None:
         self._model_manager = model_manager
         self._accumulated_dt: dict[str, float] = {}
         self._accumulated_mode: dict[str, str] = {}
         self._accumulated_pf: dict[str, float] = {}
-        # dt-weighted mean AC rebound charge of the batch: it decays within minutes,
-        # so the value at flush time would understate the batch.
+        # dt-weighted mean forced-air charge of the batch: it decays within
+        # minutes, so the value at flush time would understate the batch.
         self._accumulated_rebound: dict[str, float] = {}
+        # dt-weighted mean house temperature of the samples that carried one.
+        self._accumulated_house: dict[str, float] = {}
+        self._accumulated_house_dt: dict[str, float] = {}
+        # dt-weighted mean door coupling of the batch.
+        self._accumulated_mix: dict[str, float] = {}
+        self._accumulated_supply: dict[str, float] = {}
         # Rooms whose model temperature follows the measurement. After a restart or
         # skipped cycles it is stale, and learning the jump to the current reading as
         # one cycle's change dragged the model off (#478).
@@ -48,12 +62,23 @@ class EkfTrainingManager:
         q_residual: float = 0.0,
         shading_factor: float = 1.0,
         q_occupancy: float = 0.0,
+        T_house: float | None = None,
+        door_mix_factor: float = 1.0,
+        door_supply_factor: float = 1.0,
     ) -> None:
-        """Flush accumulated EKF update (on mode change or window open)."""
+        """Flush accumulated EKF update (on mode change or window open).
+
+        The batch means win over the arguments for values that were accumulated;
+        the arguments are the fallback for a batch without samples.
+        """
         accumulated = self._accumulated_dt.pop(area_id, 0.0)
         prev_mode = self._accumulated_mode.pop(area_id, None)
         pf = self._accumulated_pf.pop(area_id, 1.0)
         q_rebound = self._accumulated_rebound.pop(area_id, None)
+        house = self._accumulated_house.pop(area_id, T_house)
+        self._accumulated_house_dt.pop(area_id, None)
+        mix = self._accumulated_mix.pop(area_id, door_mix_factor)
+        supply = self._accumulated_supply.pop(area_id, door_supply_factor)
         if accumulated > 0 and prev_mode is not None:
             self._model_manager.update(
                 area_id,
@@ -68,6 +93,9 @@ class EkfTrainingManager:
                 q_residual=q_residual,
                 q_occupancy=q_occupancy,
                 q_rebound=q_rebound,
+                T_house=house,
+                door_mix_factor=mix,
+                door_supply_factor=supply,
             )
 
     def process(
@@ -87,11 +115,17 @@ class EkfTrainingManager:
         dt_minutes: float,
         q_occupancy: float = 0.0,
         q_rebound: float | None = None,
+        T_house: float | None = None,
+        door_mix_factor: float = 1.0,
+        door_supply_factor: float = 1.0,
     ) -> None:
         """Process an EKF training step for a room.
 
         Contains the full training decision tree: window open, raw open
-        (within delay), unobservable mode, or normal accumulation.
+        (within delay), unobservable mode, or normal accumulation.  A mode
+        change between any two of ``idle``/``heating``/``cooling``/
+        ``circulating`` flushes the previous batch, so the EKF never matches a
+        measurement against the dynamics of a different mode.
         """
         if window_open or raw_open:
             was_current = area_id in self._current
@@ -105,6 +139,9 @@ class EkfTrainingManager:
                 q_residual=q_residual,
                 shading_factor=shading_factor,
                 q_occupancy=q_occupancy,
+                T_house=T_house,
+                door_mix_factor=door_mix_factor,
+                door_supply_factor=door_supply_factor,
             )
             self.clear(area_id)
             # Always track temperature state to prevent stale _x[0]
@@ -130,6 +167,9 @@ class EkfTrainingManager:
                 q_residual=q_residual,
                 shading_factor=shading_factor,
                 q_occupancy=q_occupancy,
+                T_house=T_house,
+                door_mix_factor=door_mix_factor,
+                door_supply_factor=door_supply_factor,
             )
             self.clear(area_id)
         elif area_id not in self._synced:
@@ -150,6 +190,9 @@ class EkfTrainingManager:
                     q_residual=q_residual,
                     shading_factor=shading_factor,
                     q_occupancy=q_occupancy,
+                    T_house=T_house,
+                    door_mix_factor=door_mix_factor,
+                    door_supply_factor=door_supply_factor,
                 )
 
             old_dt = self._accumulated_dt.get(area_id, 0.0)
@@ -157,17 +200,31 @@ class EkfTrainingManager:
             if new_dt > 0:
                 old_pf = self._accumulated_pf.get(area_id, 1.0)
                 self._accumulated_pf[area_id] = (old_pf * old_dt + ekf_pf * dt_minutes) / new_dt
-                if q_rebound is None:
-                    self._accumulated_rebound.pop(area_id, None)
-                else:
+                # A sample without a charge (e.g. the blower's run ended mid-batch) must
+                # not discard what earlier samples of the same batch already learned.
+                if q_rebound is not None:
                     old_rebound = self._accumulated_rebound.get(area_id, q_rebound)
                     self._accumulated_rebound[area_id] = (old_rebound * old_dt + q_rebound * dt_minutes) / new_dt
+                if T_house is not None:
+                    house_dt = self._accumulated_house_dt.get(area_id, 0.0)
+                    new_house_dt = house_dt + dt_minutes
+                    old_house = self._accumulated_house.get(area_id, T_house)
+                    self._accumulated_house[area_id] = (old_house * house_dt + T_house * dt_minutes) / new_house_dt
+                    self._accumulated_house_dt[area_id] = new_house_dt
+                old_mix = self._accumulated_mix.get(area_id, door_mix_factor)
+                self._accumulated_mix[area_id] = (old_mix * old_dt + door_mix_factor * dt_minutes) / new_dt
+                old_supply = self._accumulated_supply.get(area_id, door_supply_factor)
+                self._accumulated_supply[area_id] = (old_supply * old_dt + door_supply_factor * dt_minutes) / new_dt
             self._accumulated_dt[area_id] = new_dt
             self._accumulated_mode[area_id] = ekf_mode
 
             if self._accumulated_dt[area_id] >= EKF_UPDATE_MIN_DT:
                 pf = self._accumulated_pf.pop(area_id, 1.0)
                 batch_rebound = self._accumulated_rebound.pop(area_id, None)
+                batch_house = self._accumulated_house.pop(area_id, None)
+                self._accumulated_house_dt.pop(area_id, None)
+                batch_mix = self._accumulated_mix.pop(area_id, door_mix_factor)
+                batch_supply = self._accumulated_supply.pop(area_id, door_supply_factor)
                 self._model_manager.update(
                     area_id,
                     current_temp,
@@ -181,6 +238,9 @@ class EkfTrainingManager:
                     q_residual=q_residual,
                     q_occupancy=q_occupancy,
                     q_rebound=batch_rebound,
+                    T_house=batch_house,
+                    door_mix_factor=batch_mix,
+                    door_supply_factor=batch_supply,
                 )
                 self._accumulated_dt[area_id] = 0.0
 
@@ -200,6 +260,10 @@ class EkfTrainingManager:
         self._accumulated_mode.pop(area_id, None)
         self._accumulated_pf.pop(area_id, None)
         self._accumulated_rebound.pop(area_id, None)
+        self._accumulated_house.pop(area_id, None)
+        self._accumulated_house_dt.pop(area_id, None)
+        self._accumulated_mix.pop(area_id, None)
+        self._accumulated_supply.pop(area_id, None)
 
     def remove_room(self, area_id: str) -> None:
         """Clean up all state for a removed room."""

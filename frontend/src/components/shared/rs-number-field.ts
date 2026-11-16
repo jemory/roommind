@@ -82,14 +82,20 @@ export class RsNumberField extends LitElement {
     return 1;
   }
 
-  /** Display bounds; temperature limits round inwards so a converted bound stays valid. */
+  /**
+   * Display bounds; temperature limits round inwards so a converted bound stays valid, and to
+   * the step's decimals so the clamped value is the one the field shows: a °F delta bound such
+   * as 6.3 would otherwise keep float noise that lands a converted °C value just outside the
+   * backend's range.
+   */
   private get _bounds(): { min: number; max: number } {
     const step = this._step;
     const min = this.min === undefined ? -Infinity : this._toShown(this.min);
     const max = this.max === undefined ? Infinity : this._toShown(this.max);
+    const round = (value: number) => Number(value.toFixed(this._decimals()));
     return {
-      min: Number.isFinite(min) ? Math.ceil(min / step - 1e-9) * step : min,
-      max: Number.isFinite(max) ? Math.floor(max / step + 1e-9) * step : max,
+      min: Number.isFinite(min) ? round(Math.ceil(min / step - 1e-9) * step) : min,
+      max: Number.isFinite(max) ? round(Math.floor(max / step + 1e-9) * step) : max,
     };
   }
 

@@ -43,9 +43,6 @@ export const editDialogHelpStyles = css`
   }
 `;
 
-const CONTROL_DOCS_URL =
-  "https://github.com/snazzybean/roommind/blob/main/docs/control-and-devices.md";
-
 export function temperaturesHelp(lang: string) {
   return html`<div slot="info">
     <p><strong>${localize("schedule.help_temps_title", lang)}</strong></p>
@@ -108,15 +105,6 @@ export function scheduleHelp(lang: string) {
   </div>`;
 }
 
-export function devicesHelp(lang: string) {
-  return html`<div slot="info">
-    <p>${localize("devices.info.intro", lang)}</p>
-    <a class="helper-link" href=${CONTROL_DOCS_URL} target="_blank" rel="noreferrer">
-      ${localize("common.learn_more", lang)}
-    </a>
-  </div>`;
-}
-
 const MODES_DOCS_URL = "https://github.com/snazzybean/roommind#full-control-vs-managed-mode";
 
 export function sensorsHelp(lang: string) {
@@ -171,12 +159,5 @@ export function coversHelp(lang: string) {
     <br /><br />
     <b>${localize("covers.info.entities_title", lang)}</b><br />
     ${localize("covers.info.entities_body", lang)}
-  </div>`;
-}
-
-export function heatSourceHelp(lang: string) {
-  return html`<div slot="info">
-    <b>${localize("heat_source.help_title", lang)}</b><br />
-    ${localize("heat_source.help_body", lang)}
   </div>`;
 }

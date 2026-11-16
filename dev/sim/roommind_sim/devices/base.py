@@ -33,6 +33,23 @@ class DeviceEnv:
     outdoor: Outdoor
     zones: dict[str, Zone]
     supply_temp_c: float | None = None  # from a boiler master, None = own default
+    closed_rooms: frozenset[str] = frozenset()  # rooms whose interior doors are all shut
+
+
+@dataclass
+class DuctState:
+    """The ducted air of a central air handler on one tick (read by ``World``).
+
+    The unit itself already distributed its burner/compressor output by
+    ``supply_weights``; ``shares`` here is the bare design split, so the world can apply
+    its own closed-door return throttling to each room's leg of the loop.
+    """
+
+    rooms: list[str]  # every room the supply ducts reach, own room first
+    shares: dict[str, float]  # normalized supply share per room, no door throttling
+    circulation_ach: float  # recirculated air changes of the served volume per hour
+    circulating: bool  # blower runs with neither burner nor compressor
+    door_closed_return_factor: float = 0.35  # returns ``m_dot`` factor of a shut room
 
 
 @dataclass
@@ -85,7 +102,7 @@ class SimDevice:
         if self.range_setpoint:
             self.target_low = self._snap(self.from_c(float(p.get("initial_low_c", 20.0))))
             self.target_high = self._snap(self.from_c(float(p.get("initial_high_c", 24.0))))
-        self.fan_mode = self.fan_modes[0] if self.fan_modes else None
+        self.fan_mode = next((m for m in self.fan_modes if m == "auto"), self.fan_modes[0] if self.fan_modes else None)
         self._last_on_mode = next((m for m in self.hvac_modes if m != "off"), "heat")
         self.quirks = [make_quirk(q) for q in self.spec.quirks]
 
@@ -218,6 +235,25 @@ class SimDevice:
         """Used by quirks/manual actions to change the mode without counting a command."""
         if mode in self.hvac_modes or mode == "off":
             self.hvac_mode = mode
+
+    # --- central ducted air -------------------------------------------------------------
+
+    @property
+    def duct_rooms(self) -> list[str]:
+        """Rooms the unit's ducts reach, own room first. Empty: not a ducted unit."""
+        return []
+
+    def blower_on(self) -> bool:
+        """True while the air handler moves air (burner/compressor call, fan on, fan_only)."""
+        return False
+
+    def duct_state(self) -> DuctState | None:
+        """The duct air the world mixes across rooms, None while the blower stands still."""
+        return None
+
+    def supply_weights(self, env: DeviceEnv) -> dict[str, float]:
+        """Normalized supply share of every served room, closed doors throttled."""
+        return {}
 
     # --- simulation -------------------------------------------------------------------
 

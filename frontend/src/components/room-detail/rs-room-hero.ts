@@ -1,10 +1,15 @@
 import { LitElement, html, css, nothing, svg } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import type { HomeAssistant, HassArea, RoomConfig, RoomLiveData } from "../../types";
+import type {
+  CentralPlantLive,
+  HomeAssistant,
+  HassArea,
+  RoomConfig,
+  RoomLiveData,
+} from "../../types";
 import {
   hintText,
   isRoomControlled,
-  minutesLeft,
   mpcStatus,
   roomHints,
   roomStateInfo,
@@ -51,6 +56,8 @@ export class RsRoomHero extends LitElement {
   @property({ attribute: false }) public outdoorTemp: number | null = null;
   @property({ type: Boolean }) public vacationActive = false;
   @property({ attribute: false }) public vacationUntil: number | null = null;
+  /** Live Central Plant status, for plant guards that affect this room. */
+  @property({ attribute: false }) public centralPlant: CentralPlantLive | null = null;
 
   @state() private _editingName = false;
   @state() private _nameInput = "";
@@ -217,6 +224,10 @@ export class RsRoomHero extends LitElement {
         color: var(--rs-heat-text);
       }
 
+      .state .circulating {
+        color: var(--rs-ok-text);
+      }
+
       .state .cool {
         color: var(--rs-cool-text);
       }
@@ -310,6 +321,13 @@ export class RsRoomHero extends LitElement {
         color: var(--secondary-text-color);
       }
 
+      .priority {
+        margin-top: 2px;
+        font-size: var(--rs-font-sm);
+        color: var(--secondary-text-color);
+        font-variant-numeric: tabular-nums;
+      }
+
       .why {
         margin-left: auto;
         text-align: end;
@@ -383,6 +401,7 @@ export class RsRoomHero extends LitElement {
         <div class="who">
           ${this._editingName ? this._renderNameEdit() : this._renderName()}
           <div class="state">${this._renderState()}</div>
+          ${this._renderPriority()}
         </div>
       </div>
       ${
@@ -395,6 +414,28 @@ export class RsRoomHero extends LitElement {
       }
       <slot name="control"></slot>
     </ha-card>`;
+  }
+
+  /** Room Priority and occupancy probability from the joint plant plan, when reported. */
+  private _renderPriority() {
+    const live = this.config?.live;
+    if (!live) return nothing;
+    const parts: string[] = [];
+    if (live.priority_weight != null) {
+      parts.push(
+        `${localize("hero.priority", this._lang)} ${formatNumber(live.priority_weight, this.hass, 1)}`,
+      );
+    }
+    if (live.occupancy_probability != null) {
+      parts.push(
+        `${localize("hero.occupancy", this._lang)} ${formatPercent(
+          Math.round(live.occupancy_probability * 100),
+          this.hass,
+        )}`,
+      );
+    }
+    if (!parts.length) return nothing;
+    return html`<div class="priority">${parts.join(" · ")}</div>`;
   }
 
   private _renderCurve(active: boolean) {
@@ -542,20 +583,6 @@ export class RsRoomHero extends LitElement {
           >`,
         );
       }
-      if (live.active_heat_sources && live.active_heat_sources !== "none") {
-        facts.push(
-          html`<span
-            ><ha-icon icon="mdi:swap-horizontal" aria-hidden="true"></ha-icon>${localize(
-              live.active_heat_sources === "primary"
-                ? "hero.heat_source_primary"
-                : live.active_heat_sources === "secondary"
-                  ? "hero.heat_source_secondary"
-                  : "hero.heat_source_both",
-              l,
-            )}</span
-          >`,
-        );
-      }
       if (live.mold_surface_rh != null) {
         const cls =
           live.mold_risk_level === "critical"
@@ -633,28 +660,10 @@ export class RsRoomHero extends LitElement {
         text: hintText(h, l),
         variant: h.severity === "info" ? "default" : h.severity,
         info:
-          h.id === "compressor"
-            ? localize("hero.compressor_protection_info", l)
-            : h.id === "setback"
-              ? localize("hero.setback_info", l)
-              : h.id === "learning_paused" && live.learning_paused_reason === "outdoor_unavailable"
-                ? localize("hero.mpc_learning_paused.outdoor_unavailable", l)
-                : undefined,
+          h.id === "learning_paused" && live.learning_paused_reason === "outdoor_unavailable"
+            ? localize("hero.mpc_learning_paused.outdoor_unavailable", l)
+            : undefined,
       }));
-    // Compressor protection without a known end has no card hint; the hero names it anyway.
-    if (live.compressor_protection_active && live.compressor_protection_until == null) {
-      chips.push({
-        icon: "mdi:timer-sand",
-        text: localize(
-          live.compressor_protection_reason === "min_run"
-            ? "hero.compressor_protection_min_run"
-            : "hero.compressor_protection_min_off",
-          l,
-        ),
-        variant: "default",
-        info: localize("hero.compressor_protection_info", l),
-      });
-    }
     if (boostHours != null) {
       chips.push({
         icon: "mdi:school-outline",
@@ -663,18 +672,23 @@ export class RsRoomHero extends LitElement {
         info: localize("learning.boost_info", l),
       });
     }
-    if (live.coil_dry_active) {
+    // Central Plant guards that affect this room right now.
+    const plant = this.centralPlant;
+    if (plant?.wet_coil_locked) {
       chips.push({
-        icon: "mdi:air-filter",
-        text: localize(
-          live.coil_dry_phase === "drain" ? "hero.coil_dry_drain" : "hero.coil_dry",
-          l,
-          {
-            time: formatMinutes(minutesLeft(live.coil_dry_until), l),
-          },
-        ),
-        variant: "default",
-        info: localize("hero.coil_dry_info", l),
+        icon: "mdi:water-alert",
+        text: localize("plant.chip.wet_coil", l),
+        variant: "warn",
+        info: localize("plant.wet_coil_lockout_minutes_info", l),
+      });
+    }
+    const pausedRooms = plant?.exterior_paused_rooms ?? [];
+    if (pausedRooms.includes(this.area.area_id)) {
+      chips.push({
+        icon: "mdi:window-open-variant",
+        text: localize("plant.chip.exterior", l, { count: pausedRooms.length }),
+        variant: "warn",
+        info: localize("plant.exterior_open_policy_info", l),
       });
     }
     return chips;

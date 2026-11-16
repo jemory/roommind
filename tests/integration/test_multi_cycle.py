@@ -1,4 +1,4 @@
-"""Integration: multi-cycle scenarios testing state accumulation and transitions."""
+"""Several control cycles in a row: commands, guards, detections and learned state."""
 
 from __future__ import annotations
 
@@ -7,128 +7,143 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from .conftest import make_hass_states, setup_room
+from custom_components.roommind.const import DOMAIN, MODE_COOLING, MODE_HEATING, MODE_IDLE
+from custom_components.roommind.coordinator import RoomMindCoordinator
+
+from .conftest import Harness, make_room
+
+pytestmark = pytest.mark.asyncio
 
 
-class TestMultiCycle:
-    @pytest.mark.asyncio
-    async def test_ekf_accumulates_across_cycles(self, coordinator, real_store):
-        """EKF should accumulate observations over multiple update cycles."""
-        await setup_room(real_store)
+async def test_heating_runs_its_minimum_run_then_settles(harness: Harness, fake_states):
+    coordinator = await harness.seed({"living_room": make_room()})
 
-        for _ in range(5):
-            await coordinator._async_update_data()
+    first = await harness.cycle()
+    assert first["central_plant"]["action"] == MODE_HEATING
 
-        model = coordinator._model_manager.get_model("living_room")
-        assert model is not None
+    # The room reaches its target, but the furnace is still inside its minimum run.
+    fake_states.set("sensor.room_temp", "21.2", {"unit_of_measurement": "°C"})
+    second = await harness.cycle()
+    assert second["central_plant"]["action"] == MODE_HEATING
+    assert second["central_plant"]["guard_reason"] == "min_run"
 
-    @pytest.mark.asyncio
-    async def test_mode_transition_heating_to_idle(self, coordinator, real_store):
-        """When temp reaches target, mode should transition from heating to idle."""
-        await setup_room(real_store)
+    # Once the run is old enough the plant may idle.
+    coordinator._plant_manager.action_started_at = time.time() - 3600
+    third = await harness.cycle()
+    assert third["central_plant"]["action"] == MODE_IDLE
 
-        # Cycle 1: temp below target -> heating
-        coordinator.hass.states.get = MagicMock(side_effect=make_hass_states(temp="18.0"))
-        data1 = await coordinator._async_update_data()
-        mode1 = data1["rooms"]["living_room"]["mode"]
 
-        # Cycle 2: temp at target -> should idle
-        # Backdate mode_on_since to bypass min-run enforcement window
-        coordinator._mode_on_since["living_room"] = coordinator._mode_on_since.get("living_room", 0) - 4000
-        coordinator.hass.states.get = MagicMock(side_effect=make_hass_states(temp="21.5"))
-        data2 = await coordinator._async_update_data()
-        mode2 = data2["rooms"]["living_room"]["mode"]
+async def test_the_plant_follows_a_cooling_day(harness: Harness, fake_states):
+    fake_states.set("sensor.outdoor_temp", "30.0", {"unit_of_measurement": "°C"})
+    fake_states.set("sensor.room_temp", "26.0", {"unit_of_measurement": "°C"})
+    await harness.seed({"living_room": make_room()})
 
-        assert mode1 in ("heating", "idle")
-        assert mode2 == "idle"
+    data = await harness.cycle()
 
-    @pytest.mark.asyncio
-    async def test_idle_start_tracked_across_cycles(self, coordinator, real_store):
-        """The idle start survives further idle cycles and is dropped by a run (#255 setback hold)."""
-        await setup_room(real_store)
+    assert data["central_plant"]["action"] == MODE_COOLING
+    # 30 °C outside is above the heating gate: only cooling and circulation are left.
+    assert "heating" not in data["central_plant"]["legal_actions"]
+    assert "cooling" in data["central_plant"]["legal_actions"]
 
-        coordinator.hass.states.get = MagicMock(side_effect=make_hass_states(temp="18.0"))
-        await coordinator._async_update_data()
-        assert coordinator._previous_modes["living_room"] == "heating"
-        assert "living_room" not in coordinator._idle_since
 
-        coordinator._mode_on_since["living_room"] -= 4000
-        coordinator.hass.states.get = MagicMock(side_effect=make_hass_states(temp="21.5"))
-        await coordinator._async_update_data()
-        assert coordinator._previous_modes["living_room"] == "idle"
-        idle_since = coordinator._idle_since["living_room"]
+async def test_a_window_pauses_and_releases_the_plant(harness: Harness, fake_states):
+    fake_states.set("binary_sensor.window", "on")
+    await harness.seed(
+        {"living_room": make_room({"exterior_window_sensors": ["binary_sensor.window"], "window_open_delay": 0})}
+    )
 
-        await coordinator._async_update_data()
-        assert coordinator._idle_since["living_room"] == idle_since
+    paused = await harness.cycle()
+    assert paused["central_plant"]["paused"] is True
+    assert paused["rooms"]["living_room"]["window_open"] is True
+    assert paused["central_plant"]["action"] == MODE_IDLE
 
-        coordinator.hass.states.get = MagicMock(side_effect=make_hass_states(temp="18.0"))
-        await coordinator._async_update_data()
-        assert "living_room" not in coordinator._idle_since
+    fake_states.set("binary_sensor.window", "off")
+    released = await harness.cycle()
+    assert released["central_plant"]["paused"] is False
+    assert released["rooms"]["living_room"]["window_open"] is False
+    assert released["central_plant"]["action"] == MODE_HEATING
 
-    @pytest.mark.asyncio
-    async def test_previous_mode_tracked_across_cycles(self, coordinator, real_store):
-        """Coordinator should track previous mode for residual heat and transitions."""
-        await setup_room(real_store)
 
-        await coordinator._async_update_data()
-        assert "living_room" in coordinator._previous_modes
+async def test_the_learned_state_survives_a_restart(harness: Harness, fake_states):
+    coordinator = await harness.seed({"living_room": make_room()})
+    await harness.cycle()
+    store = coordinator.hass.data[DOMAIN]["store"]
+    await store.async_save_thermal_data(coordinator._model_manager.to_dict())
+    await store.async_save_settings(
+        {
+            "central_plant_state": coordinator._plant_manager.to_dict(),
+            "wet_coil_state": {"charge": 0.7, "last_cooling_ts": time.time()},
+            "ventilation_state": {"fan.vent": time.time()},
+        }
+    )
 
-        prev = coordinator._previous_modes["living_room"]
-        assert prev in ("heating", "cooling", "idle")
+    restarted = RoomMindCoordinator(harness.hass, MagicMock())
+    restarted._history_store = MagicMock(
+        read_detail=MagicMock(return_value=[]), read_history=MagicMock(return_value=[])
+    )
+    harness.hass.data[DOMAIN] = {"store": store}
+    restarted._load_learned_state(store, store.get_settings())
 
-    @pytest.mark.asyncio
-    async def test_schedule_transition_comfort_to_eco(self, coordinator, real_store):
-        """Switching schedule off mid-session should change target from comfort to eco."""
-        await setup_room(real_store)
+    assert restarted._model_manager.get_estimator("living_room")._x[0] == pytest.approx(18.0)
+    assert restarted._plant_manager.active_action == MODE_HEATING
+    assert restarted._wet_coil.charge == pytest.approx(0.7)
+    assert restarted._ventilation.is_running("fan.vent") is True
 
-        # Schedule on -> comfort
-        coordinator.hass.states.get = MagicMock(side_effect=make_hass_states(schedule_state="on"))
-        data1 = await coordinator._async_update_data()
-        assert data1["rooms"]["living_room"]["target_temp"] == 21.0
 
-        # Schedule off -> eco
-        coordinator.hass.states.get = MagicMock(side_effect=make_hass_states(schedule_state="off"))
-        data2 = await coordinator._async_update_data()
-        assert data2["rooms"]["living_room"]["target_temp"] == 17.0
+async def test_a_second_cycle_reuses_the_same_estimators(harness: Harness):
+    coordinator = await harness.seed({"living_room": make_room()})
 
-    @pytest.mark.asyncio
-    async def test_override_expires_falls_back_to_schedule(self, coordinator, real_store):
-        """When override timer expires, target should revert to schedule-based temp."""
-        await setup_room(real_store)
-        await real_store.async_update_room(
-            "living_room",
-            {
-                "override_heat": 25.0,
-                "override_cool": 25.0,
-                "override_until": time.time() - 1,
-                "override_type": "custom",
-            },
-        )
+    await harness.cycle()
+    estimator = coordinator._model_manager.get_estimator("living_room")
+    data = await harness.cycle()
 
-        data = await coordinator._async_update_data()
+    assert coordinator._model_manager.get_estimator("living_room") is estimator
+    assert data["rooms"]["living_room"]["n_observations"] >= 0
 
-        assert data["rooms"]["living_room"]["target_temp"] == 21.0
 
-    @pytest.mark.asyncio
-    async def test_climate_control_disabled_shows_idle(self, coordinator, real_store):
-        """With climate_control_active=false, no climate service calls should be made."""
-        await setup_room(
-            real_store,
-            settings={
-                "outdoor_temp_sensor": "sensor.outdoor_temp",
-                "climate_control_active": False,
-            },
-        )
-        # Mock climate entity as "off" so _observe_device_action and _infer both return idle
-        coordinator.hass.states.get = MagicMock(
-            side_effect=make_hass_states(
-                climate_state="off",
+async def test_the_thermostat_keeps_its_fallback_band_while_idle(harness: Harness, fake_states):
+    fake_states.set("sensor.room_temp", "21.1", {"unit_of_measurement": "°C"})
+    await harness.seed({"living_room": make_room()})
+
+    await harness.cycle()
+    await harness.cycle()
+
+    setpoints = [
+        call.args[2] for call in harness.hass.services.async_call.call_args_list if call.args[1] == "set_temperature"
+    ]
+    assert setpoints
+    assert 5.0 <= setpoints[-1]["target_temp_low"] <= setpoints[-1]["target_temp_high"] <= 35.0
+
+
+async def test_a_room_override_reaches_the_wall_thermostat(harness: Harness):
+    await harness.seed(
+        {
+            "living_room": make_room(
+                {
+                    "override_heat": 23.0,
+                    "override_cool": 25.0,
+                    "override_until": time.time() + 3600,
+                    "override_type": "custom",
+                }
             )
-        )
+        }
+    )
 
-        coordinator.hass.services.async_call.reset_mock()
-        data = await coordinator._async_update_data()
+    data = await harness.cycle()
 
-        assert data["rooms"]["living_room"]["mode"] == "idle"
-        for call in coordinator.hass.services.async_call.call_args_list:
-            assert call[0][0] != "climate", f"Unexpected climate call: {call}"
+    assert data["rooms"]["living_room"]["heat_target"] == 23.0
+    nudge = [
+        call.args[2] for call in harness.hass.services.async_call.call_args_list if call.args[1] == "set_temperature"
+    ]
+    # The nudge sits just past the thermostat's own reading, not at the remote room target.
+    assert nudge and nudge[-1]["target_temp_low"] < 23.0
+
+
+async def test_the_cycle_is_idempotent_without_changes(harness: Harness, fake_states):
+    await harness.seed({"living_room": make_room()})
+
+    first = await harness.cycle()
+    second = await harness.cycle()
+
+    assert first["rooms"]["living_room"]["heat_target"] == second["rooms"]["living_room"]["heat_target"]
+    assert first["central_plant"]["action"] == second["central_plant"]["action"] == MODE_HEATING

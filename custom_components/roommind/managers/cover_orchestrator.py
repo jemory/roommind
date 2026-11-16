@@ -30,6 +30,8 @@ from ..const import (
     DEFAULT_COVERS_OUTDOOR_MIN_TEMP,
     MAX_SENSOR_STALENESS,
     MODE_COOLING,
+    MODE_HEATING,
+    MODE_IDLE,
     TargetTemps,
 )
 from ..control.solar import (
@@ -39,7 +41,6 @@ from ..control.solar import (
     solar_elevation,
     surface_irradiance_factor,
 )
-from ..utils.device_utils import get_ac_eids
 from ..utils.schedule_utils import resolve_schedule_index
 from .cover_manager import _SUPPORT_SET_POSITION, CoverDecision, CoverManager, compute_shading_factor
 
@@ -50,6 +51,24 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# ThermalEKF state index of ``beta_s`` (solar gain) in the 9-state layout
+# ``[T, alpha_out, alpha_house, beta_h, beta_c, beta_fan, beta_s, beta_o, beta_f]``
+# (see ``control/thermal_model.py``). It was 4 in the old 5/7-state filter.
+EKF_SOLAR_GAIN_INDEX: int = 6
+
+# Whole-home coordination thresholds. They belong to the cover loop (the central
+# plant only states its demand), so they live here instead of const.py.
+# A warm sunny room deploys at half its usual excess, but never below this, so
+# sensor noise cannot shade the room.
+COVER_PRE_SHADE_THRESHOLD_FACTOR: float = 0.5
+COVER_PRE_SHADE_THRESHOLD_MIN: float = 0.5
+# How far above the house reference a room counts as the warm outlier the plant
+# would cool the whole home for.
+HOUSE_WARM_OUTLIER_OFFSET_C: float = 0.8
+# How far below its target a room must run while the plant heats before free
+# sun is worth more than shading (0.8 K on the floor would already shade it).
+COVER_HEATING_HARVEST_DELTA_C: float = 1.0
+
 
 @dataclass
 class CoverPositionResult:
@@ -57,6 +76,32 @@ class CoverPositionResult:
 
     shading_factor: float
     positions: list[int]
+    # Whether the room has motorized covers RoomMind may command. Read-only
+    # covers still shade the room (shading_factor) without this being True.
+    has_covers: bool = False
+
+
+@dataclass(frozen=True)
+class HouseCoverContext:
+    """Whole-home state the central plant shares with one room's cover logic.
+
+    ``None`` — the default in :meth:`CoverOrchestrator.async_process` — keeps
+    the room standalone: its covers then decide on the room alone, exactly as
+    before the central HVAC adaptation.
+
+    Attributes:
+        house_ref_temp: House Reference Temperature the rooms are compared
+            against, or None while it is unknown.
+        plant_demand: What the shared plant is doing, one of ``"idle"``,
+            ``"heating"``, ``"cooling"``, ``"circulating"``.
+        any_occupied_cool_sensitive: True when another occupied room sits
+            within 0.8 K of its ``comfort_heat`` floor, so running the plant in
+            cooling would chill a room that must not be chilled.
+    """
+
+    house_ref_temp: float | None = None
+    plant_demand: str = MODE_IDLE
+    any_occupied_cool_sensitive: bool = False
 
 
 @dataclass
@@ -100,8 +145,21 @@ class CoverOrchestrator:
         self._cloud_series = cloud_series
 
     def read_positions(self, area_id: str, room: dict[str, Any]) -> CoverPositionResult:
-        """Read current cover positions from HA state and update cover manager."""
+        """Read current cover positions from HA state and update cover manager.
+
+        The room's ``shading_factor`` averages the motorized ``covers`` and the
+        ``read_only_covers`` (manual blinds with a position, or a numeric 0..100
+        sensor): sunlight through a hand-drawn blind heats the room just the
+        same, so the EKF and the MPC have to model the solar gain behind it.
+
+        Only the motorized covers drive the tracked position and the user
+        override detection — a read-only cover is never commanded, so a hand
+        move of it is not a reason to pause automatic control.
+        """
         cover_eids: list[str] = room.get("covers", [])
+        # An entity configured in both lists is a motorized cover, not a second reading
+        read_only_eids: list[str] = [eid for eid in room.get("read_only_covers", []) if eid not in cover_eids]
+
         cover_positions: list[int] = []
         for eid in cover_eids:
             pos = self._reading(eid)
@@ -115,8 +173,18 @@ class CoverOrchestrator:
                 override_minutes=room.get("covers_override_minutes", 60),
             )
 
-        shading_factor = compute_shading_factor(cover_positions)
-        return CoverPositionResult(shading_factor=shading_factor, positions=cover_positions)
+        positions = list(cover_positions)
+        for eid in read_only_eids:
+            pos = self._reading(eid)
+            if pos is not None:
+                positions.append(pos)
+
+        shading_factor = compute_shading_factor(positions)
+        return CoverPositionResult(
+            shading_factor=shading_factor,
+            positions=positions,
+            has_covers=bool(room.get("covers")),
+        )
 
     async def async_process(
         self,
@@ -130,11 +198,16 @@ class CoverOrchestrator:
         predicted_peak_temp: float | None,
         has_override: bool,
         window_open: bool = False,
+        house_context: HouseCoverContext | None = None,
     ) -> CoverResult:
         """Process cover control for a room: MPC check, schedule, prediction, evaluate, apply.
 
         *window_open* is the raw window state (no open/close delay, pending counts
         as open). With ``covers_window_hold`` it keeps the covers from going down.
+
+        *house_context* is the whole-home state the central plant knows (house
+        reference temperature and demand). ``None`` (default) keeps the room
+        standalone: nothing below changes for a room that runs on its own.
         """
         # Early exit: when auto control is disabled, do nothing.
         # Schedule, night close and MPC are all suppressed — covers stay wherever they are.
@@ -159,9 +232,8 @@ class CoverOrchestrator:
         # targets.heat stays in the max() as a floor: a comfort_cool below the
         # heating setpoint must not shade harder than before.
         comfort_cool = room.get("comfort_cool", DEFAULT_COMFORT_COOL)
-        can_cool = room.get("climate_mode", "auto") != CLIMATE_MODE_HEAT_ONLY and bool(
-            get_ac_eids(room.get("devices", []))
-        )
+        # The Central Plant serves every room, so a room that may cool can always cool.
+        can_cool = room.get("climate_mode", "auto") != CLIMATE_MODE_HEAT_ONLY
         if targets.cool is not None and (can_cool or mode == MODE_COOLING):
             cover_target = targets.cool
         else:
@@ -322,6 +394,22 @@ class CoverOrchestrator:
             _cover_predicted_peak = cover_target
 
         # Block E: Evaluate + apply
+        # Whole-home passive solar harvest: while the central plant heats and this
+        # room runs more than a degree below its target, sun through the glass is
+        # heat the plant does not have to make. Suppressing the automatic solar
+        # deployment sets the threat to the current temperature, which retracts an
+        # owned cover; a force schedule or the night close still wins, they are
+        # resolved into _forced_position and Gate 1 of evaluate() ignores the
+        # prediction entirely.
+        if current_temp is not None and self._passive_solar_harvest(house_context, current_temp, cover_target):
+            _cover_predicted_peak = current_temp
+            _LOGGER.debug(
+                "Cover harvest [%s]: plant heating and %.2f below target %.2f, suppressing solar deployment",
+                area_id,
+                cover_target - current_temp,
+                cover_target,
+            )
+
         cover_eids = room.get("covers", [])
         _cover_min_positions: dict[str, int] = room.get("cover_min_positions", {})
         window_hold = window_open and room.get("covers_window_hold", False)
@@ -330,7 +418,7 @@ class CoverOrchestrator:
             area_id,
             covers_auto_enabled=room.get("covers_auto_enabled", False),
             cover_entity_ids=cover_eids,
-            covers_deploy_threshold=room.get("covers_deploy_threshold", 1.5),
+            covers_deploy_threshold=self._deploy_threshold(room, house_context, current_temp),
             covers_min_position=room.get("covers_min_position", 0),
             covers_snap_deploy=room.get("covers_snap_deploy", False),
             shade_by_need=can_cool,
@@ -399,11 +487,71 @@ class CoverOrchestrator:
             return False
         return state is not None or er.async_get(self.hass).async_get(entity_id) is not None
 
+    @staticmethod
+    def _deploy_threshold(
+        room: dict[str, Any],
+        house_context: HouseCoverContext | None,
+        current_temp: float | None,
+    ) -> float:
+        """Excess °C at which the covers deploy, halved for a room warming ahead of the house.
+
+        A sunny room that runs warm while the plant is already cooling (or while a
+        cool-sensitive occupied room would suffer) is the room that would make the
+        plant cool the whole home; shading it first is far cheaper. The floor
+        keeps a low configured threshold from deploying on sensor noise.
+        """
+        deploy_threshold: float = room.get("covers_deploy_threshold", 1.5)
+        if house_context is None:
+            return deploy_threshold
+        warm_outlier = (
+            house_context.house_ref_temp is not None
+            and current_temp is not None
+            and current_temp > house_context.house_ref_temp + HOUSE_WARM_OUTLIER_OFFSET_C
+            and house_context.any_occupied_cool_sensitive
+        )
+        if house_context.plant_demand != MODE_COOLING and not warm_outlier:
+            return deploy_threshold
+        return max(COVER_PRE_SHADE_THRESHOLD_MIN, deploy_threshold * COVER_PRE_SHADE_THRESHOLD_FACTOR)
+
+    @staticmethod
+    def _passive_solar_harvest(
+        house_context: HouseCoverContext | None,
+        current_temp: float | None,
+        target_temp: float,
+    ) -> bool:
+        """True while free sun is worth more than shading: the plant heats and the room is below target.
+
+        Only the *automatic* solar deployment is suppressed. A force schedule and
+        the night close still apply, and a room already at its target keeps the
+        usual overheating protection.
+        """
+        return (
+            house_context is not None
+            and house_context.plant_demand == MODE_HEATING
+            and current_temp is not None
+            and current_temp < target_temp - COVER_HEATING_HARVEST_DELTA_C
+        )
+
     def _reading(self, eid: str) -> int | None:
-        """Position a cover reports, None while it reports none (unavailable, moving binary cover)."""
+        """Position an entity reports, None while it reports none.
+
+        ``cover.*``: the ``current_position`` attribute, else 0 when closed and
+        100 when open (a binary cover reports no position while it moves).
+        ``sensor.*`` (a read-only cover): the numeric state as a percentage,
+        clamped to 0..100 (100 = fully open) and rounded, since a sensor has no
+        position attribute.
+        """
         cstate = self.hass.states.get(eid)
         if cstate is None:
             return None
+        if eid.startswith("sensor."):
+            try:
+                level = float(cstate.state)
+            except (ValueError, TypeError):
+                return None
+            if not math.isfinite(level):
+                return None
+            return int(round(max(0.0, min(100.0, level))))
         pos = cstate.attributes.get("current_position")
         if pos is not None:
             return int(pos)
@@ -468,7 +616,8 @@ class CoverOrchestrator:
     ) -> float:
         """Estimate peak temperature from solar gain.
 
-        Tier 1: RC model trajectory (idle model confident, incl. heat loss physics)
+        Tier 1: RC model trajectory (idle model confident and ``beta_s`` learned
+            at :data:`EKF_SOLAR_GAIN_INDEX`, incl. heat loss physics)
         Tier 2: Conservative linear fallback with default beta_s
 
         *surface_azimuths*: list of cover surface azimuths (degrees, 0=N).
@@ -657,11 +806,24 @@ class CoverOrchestrator:
     def _idle_solar_model_confident(self, area_id: str, T_room: float, T_outdoor: float) -> bool:
         """Check if idle model with solar is confident enough for trajectory prediction.
 
-        Uses a reference q_solar to include beta_s uncertainty (P[4][4]) in the check.
-        When beta_s hasn't learned from solar data yet, P[4][4] remains high,
-        making prediction_std exceed the threshold -> falls back to linear.
+        Two conditions, both about the solar gain the trajectory would use:
+
+        * the filter has actually learned ``beta_s`` — state
+          :data:`EKF_SOLAR_GAIN_INDEX` (6) of the 9-state
+          ``[T, alpha_out, alpha_house, beta_h, beta_c, beta_fan, beta_s,
+          beta_o, beta_f]`` layout, 4 in the old 5/7-state filter. Until a sunny
+          idle step moved it, the learned gain is just its prior and the
+          conservative linear tier is the better estimate. A room without a
+          filter has no learned gain to check: ``get_prediction_std`` answers
+          infinite there and the check below falls back anyway.
+        * its uncertainty stays small at a reference ``q_solar``, which adds the
+          ``P[6][6]`` term to the prediction variance.
         """
         try:
+            if area_id in self._model_manager.get_room_ids() and not self._model_manager.is_param_learned(
+                area_id, EKF_SOLAR_GAIN_INDEX
+            ):
+                return False
             pred_std = self._model_manager.get_prediction_std(
                 area_id,
                 0.0,

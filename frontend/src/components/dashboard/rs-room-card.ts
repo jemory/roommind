@@ -14,7 +14,7 @@ import {
 import { localize } from "../../utils/localize";
 import { errorText } from "../../utils/errors";
 import { formatTempLocale, tempUnit, toDisplayDelta } from "../../utils/temperature";
-import { formatPercent } from "../../utils/format";
+import { formatNumber, formatPercent } from "../../utils/format";
 import { buildSparkline, type SparklinePaths, type RecentTemp } from "../../utils/sparkline";
 import { quickMessage, quickOptions, quickValueOf, type QuickValue } from "../../utils/override";
 import { tokens, srOnly } from "../../styles/tokens";
@@ -166,6 +166,25 @@ export class RsRoomCard extends LitElement {
 
       .state.cool {
         color: var(--rs-cool-text);
+      }
+
+      .state.circulating {
+        color: var(--rs-ok-text);
+      }
+
+      .pill {
+        flex: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 1px 8px;
+        border-radius: 10px;
+        background: var(--rs-fill);
+        color: var(--secondary-text-color);
+        font-size: 11px;
+        line-height: 18px;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
       }
 
       .temps {
@@ -437,6 +456,7 @@ export class RsRoomCard extends LitElement {
         <div class="head">
           <ha-icon class="ricon" .icon=${icon}></ha-icon>
           <h3>${this._link(name)}</h3>
+          ${this._renderPriority()}
           ${
             st
               ? html`<span class="state ${st.tone}">
@@ -458,6 +478,28 @@ export class RsRoomCard extends LitElement {
       </div>
       <div class="sr-only" aria-live="polite">${this._error}</div>
     </ha-card>`;
+  }
+
+  /** Room Priority and occupancy probability from the joint plant plan, when reported. */
+  private _renderPriority() {
+    const live = this.config?.live;
+    if (!live) return nothing;
+    const parts: string[] = [];
+    if (live.priority_weight != null) {
+      parts.push(
+        `${localize("card.pill.priority", this._lang)} ${formatNumber(live.priority_weight, this.hass, 1)}`,
+      );
+    }
+    if (live.occupancy_probability != null) {
+      parts.push(
+        `${localize("card.pill.occupancy", this._lang)} ${formatPercent(
+          Math.round(live.occupancy_probability * 100),
+          this.hass,
+        )}`,
+      );
+    }
+    if (!parts.length) return nothing;
+    return html`<span class="pill">${parts.join(" · ")}</span>`;
   }
 
   private _link(name: string) {

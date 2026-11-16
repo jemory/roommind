@@ -1,6 +1,13 @@
 import { describe, expect, test } from "vitest";
 import type { RoomConfig, RoomLiveData } from "../types";
-import { hintText, roomHints, type RoomHintContext } from "./room-state";
+import {
+  hintText,
+  isControlledZone,
+  roomHints,
+  roomKind,
+  roomStateInfo,
+  type RoomHintContext,
+} from "./room-state";
 
 const ctx: RoomHintContext = {
   climateControlActive: true,
@@ -56,59 +63,6 @@ describe("roomHints pre-heat", () => {
   });
 });
 
-describe("roomHints setback (#509)", () => {
-  const ids = (r: RoomConfig) => roomHints(r, "controlled", ctx).map((h) => h.id);
-  const setbackText = (r: RoomConfig) =>
-    hintText(
-      roomHints(r, "controlled", ctx).find((h) => h.id === "setback")!,
-      "de",
-    );
-
-  test("counts down to the earliest switch-off", () => {
-    const until = Date.now() / 1000 + 25 * 60;
-    expect(setbackText(room({ setback: { devices: ["climate.ac"], until } }))).toBe(
-      "Absenkung, aus in 25\u00a0min ohne Bedarf",
-    );
-  });
-
-  test("without a time, or once it passed, the device just stays on", () => {
-    expect(setbackText(room({ setback: { devices: ["climate.ac"], until: null } }))).toBe(
-      "Absenkung, bleibt an",
-    );
-    const past = Date.now() / 1000 - 60;
-    expect(setbackText(room({ setback: { devices: ["climate.ac"], until: past } }))).toBe(
-      "Absenkung, bleibt an",
-    );
-  });
-
-  test("does not push the more important hints out of the tile's first place", () => {
-    const r = room({
-      setback: { devices: ["climate.ac"], until: null },
-      compressor_protection_until: Date.now() / 1000 + 600,
-      compressor_protection_reason: "min_off",
-      occupancy_vacant: true,
-      mold_prevention_active: true,
-      mold_prevention_delta: 1,
-      price_shift_heat: -1,
-    });
-    expect(ids(r)).toEqual([
-      "compressor",
-      "room_vacant",
-      "mold_prevention",
-      "price_shift",
-      "setback",
-    ]);
-  });
-
-  test("no hint without a held device or while the room runs", () => {
-    expect(ids(room({ setback: null }))).not.toContain("setback");
-    expect(ids(room({ setback: { devices: [], until: null } }))).not.toContain("setback");
-    expect(
-      ids(room({ mode: "heating", setback: { devices: ["climate.ac"], until: null } })),
-    ).not.toContain("setback");
-  });
-});
-
 describe("roomHints air quality (#267)", () => {
   test("names the CO2 reading and comes right after the mold risk", () => {
     const hints = roomHints(
@@ -150,5 +104,91 @@ describe("roomHints air quality (#267)", () => {
   test("no hint while the air is good", () => {
     const hints = roomHints(room({ co2: 900, air_quality_bad: false }), "controlled", ctx);
     expect(hints.map((h) => h.id)).not.toContain("air_quality");
+  });
+});
+
+describe("Central HVAC room kind", () => {
+  test("a room with a temperature sensor is a controlled Thermal Zone without devices", () => {
+    const config = {
+      area_id: "living",
+      temperature_sensor: "sensor.t",
+      window_sensors: [],
+      live: { mode: "idle", mpc_active: true, mold_risk_level: "ok" },
+    } as unknown as RoomConfig;
+    expect(isControlledZone(config)).toBe(true);
+    expect(roomKind(config, 0)).toBe("controlled");
+  });
+
+  test("an outdoor area is never a controlled zone", () => {
+    const config = {
+      area_id: "garden",
+      temperature_sensor: "sensor.out",
+      is_outdoor: true,
+      window_sensors: [],
+      live: { mode: "idle", mpc_active: false, mold_risk_level: "ok" },
+    } as unknown as RoomConfig;
+    expect(isControlledZone(config)).toBe(false);
+    expect(roomKind(config, 0)).toBe("outdoor");
+  });
+
+  test("a room without a temperature sensor is not controlled", () => {
+    const config = {
+      area_id: "hall",
+      temperature_sensor: "",
+      window_sensors: [],
+    } as unknown as RoomConfig;
+    expect(isControlledZone(config)).toBe(false);
+    expect(roomKind(config, 0)).toBe("empty");
+  });
+});
+
+describe("roomStateInfo circulating", () => {
+  test("reports circulating air with the fan icon", () => {
+    const config = {
+      area_id: "living",
+      temperature_sensor: "sensor.t",
+      window_sensors: [],
+      live: { mode: "circulating", mpc_active: true, mold_risk_level: "ok" },
+    } as unknown as RoomConfig;
+    const st = roomStateInfo(config, true);
+    expect(st.tone).toBe("circulating");
+    expect(st.icon).toBe("mdi:fan");
+    expect(st.key).toBe("card.state.circulating");
+  });
+
+  test("a fan-only sample without the circulating mode still shows circulation", () => {
+    const config = {
+      area_id: "living",
+      temperature_sensor: "sensor.t",
+      window_sensors: [],
+      live: { mode: "idle", fan_circulating: true, mpc_active: true, mold_risk_level: "ok" },
+    } as unknown as RoomConfig;
+    expect(roomStateInfo(config, true).tone).toBe("circulating");
+  });
+});
+
+describe("roomHints Central HVAC openings and effective temperature", () => {
+  test("an open exterior opening is a warning", () => {
+    const hints = roomHints(room({ exterior_window_open: true }), "controlled", ctx);
+    const hint = hints.find((h) => h.id === "exterior_window_open");
+    expect(hint).toBeDefined();
+    expect(hint!.severity).toBe("warn");
+  });
+
+  test("a closed interior door is an info hint", () => {
+    const hints = roomHints(room({ interior_door_open: false }), "controlled", ctx);
+    expect(hints.map((h) => h.id)).toContain("interior_door_closed");
+  });
+
+  test("an effective temperature far from the reading is named", () => {
+    const hints = roomHints(room({ current_temp: 22, effective_temp: 23.1 }), "controlled", ctx);
+    const hint = hints.find((h) => h.id === "effective_temp");
+    expect(hint).toBeDefined();
+    expect(hintText(hint!, "de")).toContain("23,1");
+  });
+
+  test("a small humidity correction stays quiet", () => {
+    const hints = roomHints(room({ current_temp: 22, effective_temp: 22.1 }), "controlled", ctx);
+    expect(hints.map((h) => h.id)).not.toContain("effective_temp");
   });
 });

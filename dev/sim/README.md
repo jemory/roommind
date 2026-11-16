@@ -24,9 +24,9 @@ the integration: the Marketplace (formerly HACS) ships only `custom_components/r
 ## Quick start
 
 ```bash
-dev/sim/bin/sim run smoke-ac-compressor        # batch run in turbo, prints PASS/FAIL + report path
+dev/sim/bin/sim run central-open-window-door-isolation        # batch run in turbo, prints PASS/FAIL + report path
 dev/sim/bin/sim suite -j 4                     # whole library
-dev/sim/bin/sim up main --scenario baseline-radiator-house --set start=now-3d --catch-up
+dev/sim/bin/sim up main --scenario central-occupancy-priority-and-trends --set start=now-3d --catch-up
 dev/sim/bin/sim shot main --path /roommind/room/wohnzimmer --viewport mobile
 dev/sim/bin/sim down main
 ```
