@@ -3,6 +3,14 @@ name: Release
 on:
   release:
     types: [published]
+  # Forked repositories do not dispatch `release` events until their workflows are
+  # enabled, so the same build can be started by hand for an existing tag:
+  #   gh workflow run release.yml -R <owner>/<repo> -f tag=v3.0.0
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and upload roommind.zip for
+        required: true
 
 jobs:
   build-and-upload:
@@ -12,6 +20,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
 
       - name: Set up Node
         uses: actions/setup-node@v7.1.0
@@ -32,4 +42,5 @@ jobs:
       - name: Upload release asset
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" roommind.zip --clobber
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" roommind.zip --clobber
