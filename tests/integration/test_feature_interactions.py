@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -277,3 +277,201 @@ async def test_the_climate_mode_is_taken_from_the_rooms(harness: Harness, fake_s
     assert data["central_plant"]["climate_mode"] == "auto"
     assert "heating" in data["central_plant"]["legal_actions"]
     assert "cooling" in data["central_plant"]["legal_actions"]
+
+
+# ---------------------------------------------------------------------------
+# House layer (T4): MPC inputs, priority inputs and the live payload
+# ---------------------------------------------------------------------------
+
+HOUSE_ON = {
+    "house": {
+        "enabled": True,
+        "heat_c": 22.0,
+        "cool_c": 25.0,
+        "eco_heat_c": 16.0,
+        "eco_cool_c": 28.0,
+        "climate_mode": "auto",
+    }
+}
+HOUSE_HEAT_ONLY = {
+    "house": {
+        "enabled": True,
+        "heat_c": 22.0,
+        "cool_c": 25.0,
+        "eco_heat_c": 16.0,
+        "eco_cool_c": 28.0,
+        "climate_mode": "heat_only",
+    }
+}
+HOUSE_OFF = {"house": {"enabled": False}}
+
+
+async def _capture_mpc_rooms(harness: Harness) -> list[Any]:
+    """Cycle once and return the ``RoomHorizonInput`` list handed to the MPC."""
+    coordinator = harness.coordinator
+    assert coordinator is not None
+    captured: list[Any] = []
+    real_evaluate = coordinator._mpc_controller.evaluate
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        captured.extend(kwargs.get("rooms", []))
+        return real_evaluate(*args, **kwargs)
+
+    coordinator._mpc_controller.evaluate = MagicMock(side_effect=_spy)
+    await harness.cycle()
+    return captured
+
+
+async def test_mpc_comfort_series_come_from_the_house_for_a_follower(harness: Harness, fake_states):
+    fake_states.set("sensor.office_temp", "18.0", {"unit_of_measurement": "°C"})
+    captured = await _capture_mpc_rooms(await _seed_with_house(harness, HOUSE_ON))
+
+    office = next(room for room in captured if room.area_id == "office")
+    assert office.comfort_heat_series[0] == 22.0
+    assert office.comfort_cool_series[0] == 25.0
+
+
+async def test_house_heat_only_mode_masks_the_followers_cool_series(harness: Harness, fake_states):
+    fake_states.set("sensor.living_temp", "18.0", {"unit_of_measurement": "°C"})
+    fake_states.set("sensor.office_temp", "18.0", {"unit_of_measurement": "°C"})
+    captured = await _capture_mpc_rooms(
+        await _seed_with_house(
+            harness,
+            HOUSE_HEAT_ONLY,
+            rooms={
+                "living_room": make_room(),
+                "office": make_room({"temperature_sensor": "sensor.office_temp"}),
+            },
+        )
+    )
+
+    assert captured
+    for room in captured:
+        assert all(heat == 22.0 for heat in room.comfort_heat_series)
+        assert all(cool is None for cool in room.comfort_cool_series)
+
+
+async def _seed_with_house(
+    harness: Harness,
+    settings: dict,
+    rooms: dict | None = None,
+) -> Harness:
+    """Seed the harness with the given house settings (house layer under test)."""
+    await harness.seed(
+        rooms or {"living_room": make_room(), "office": make_room({"temperature_sensor": "sensor.office_temp"})},
+        settings=settings,
+    )
+    return harness
+
+
+async def test_priority_weight_of_a_follower_without_a_setting_is_its_occupancy_weight(harness: Harness):
+    await harness.seed(
+        {"living_room": make_room()},
+        settings=HOUSE_ON,
+    )
+
+    data = await harness.cycle()
+
+    # follow_schedule with no sensors and no schedule block: occupancy weight 1.0.
+    assert data["rooms"]["living_room"]["priority_weight"] == pytest.approx(1.0)
+
+
+async def test_priority_weight_adds_the_room_setting_bump(harness: Harness):
+    harness.hass.services.async_call = AsyncMock(
+        side_effect=schedule_service(week_blocks("00:00:00", "23:59:59", {"heat_temperature": 19.0}))
+    )
+    harness.hass.states.set("schedule.living", "on", {})
+    await harness.seed(
+        {"living_room": make_room({"schedules": [{"entity_id": "schedule.living"}]})},
+        settings=HOUSE_ON,
+    )
+
+    data = await harness.cycle()
+
+    # Base 1.0 + ROOM_SETTING_TIE_WEIGHT (0.02).
+    assert data["rooms"]["living_room"]["priority_weight"] == pytest.approx(1.02)
+
+
+async def test_priority_weight_adds_the_manual_override_bump(harness: Harness):
+    await harness.seed(
+        {
+            "living_room": make_room(
+                {
+                    "override_heat": 23.0,
+                    "override_cool": 26.0,
+                    "override_until": time.time() + 3600,
+                    "override_type": "custom",
+                }
+            )
+        },
+        settings=HOUSE_ON,
+    )
+
+    data = await harness.cycle()
+
+    # Base 1.0 + MANUAL_OVERRIDE_TIE_WEIGHT (0.05).
+    assert data["rooms"]["living_room"]["priority_weight"] == pytest.approx(1.05)
+
+
+async def test_live_house_payload_carries_every_consumed_key(harness: Harness, fake_states):
+    fake_states.set("schedule.house", "on", {"friendly_name": "Whole home"})
+    harness.hass.services.async_call = AsyncMock(
+        side_effect=schedule_service(week_blocks("00:00:00", "23:59:59", {"heat_temperature": 21.0}))
+    )
+    await harness.seed(
+        {
+            "living_room": make_room(),
+            "office": make_room({"temperature_sensor": "sensor.office_temp"}),
+        },
+        settings={
+            "house": {
+                "enabled": True,
+                "heat_c": 22.0,
+                "cool_c": 25.0,
+                "eco_heat_c": 16.0,
+                "eco_cool_c": 28.0,
+                "climate_mode": "auto",
+                "schedules": [{"entity_id": "schedule.house"}],
+            }
+        },
+    )
+
+    data = await harness.cycle()
+
+    house = data["house"]
+    # Resolved settings keys are always present.
+    assert house["enabled"] is True
+    assert house["heat_c"] == 22.0
+    assert house["eco_heat_c"] == 16.0
+    assert house["climate_mode"] == "auto"
+    assert house["schedules"] == [{"entity_id": "schedule.house"}]
+    # Derived live fields the card / panel / entity read.
+    assert house["active"] is True
+    assert house["band"] == {"heat_c": 21.0, "cool_c": 25.0}
+    assert house["source"] == "schedule"
+    assert house["override_active"] is False
+    assert house["schedule_entity"] == "schedule.house"
+    assert house["schedule_name"] == "Whole home"
+    assert house["schedule_block"] == {"from": "00:00:00", "to": "23:59:59"}
+    assert "next_change" in house
+    assert house["following_rooms"] == 2
+
+
+async def test_live_house_payload_exists_before_and_without_an_active_house(harness: Harness):
+    # No cycle yet: the coordinator always advertises a house payload.
+    await harness.seed({"living_room": make_room()}, settings=HOUSE_OFF)
+
+    data = await harness.cycle()
+
+    house = data["house"]
+    assert house["active"] is False
+    assert house["enabled"] is False
+    # Even inert, the payload carries the configured house targets as the band.
+    assert house["band"] == {"heat_c": 21.0, "cool_c": 24.0}
+    assert house["source"] is None
+    assert house["override_active"] is False
+    assert house["schedule_entity"] == ""
+    assert house["schedule_name"] == ""
+    assert house["schedule_block"] is None
+    assert house["next_change"] is None
+    assert house["following_rooms"] == 0

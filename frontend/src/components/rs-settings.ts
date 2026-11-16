@@ -16,9 +16,11 @@ import type {
   NotificationTarget,
   RoomWithoutArea,
   PriceStatus,
+  HouseConfig,
+  HouseLive,
 } from "../types";
 import { PLANT_FIELDS, readPlantFields, writePlantFields } from "../utils/plant-settings";
-import { localize } from "../utils/localize";
+import { localize, type TranslationKey } from "../utils/localize";
 import { errorText } from "../utils/errors";
 import { fireSaveStatus } from "../utils/events";
 import { VACATION_SENTINEL } from "../utils/constants";
@@ -26,6 +28,8 @@ import { formatNumber, formatPercent } from "../utils/format";
 import { learningRoomIds } from "../utils/learning";
 import { formatTempLocale, tempUnit, toDisplayDelta } from "../utils/temperature";
 import { describePriceStatus } from "../utils/price-status";
+import { HOUSE_DEFAULTS, validateHouseSettings } from "../utils/house-settings";
+import { followingRoomsLabel } from "../utils/house-state";
 import { tokens, alertStyles } from "../styles/tokens";
 import {
   SETTINGS_GROUPS,
@@ -47,6 +51,7 @@ import "./settings/rs-settings-notifications";
 import "./settings/rs-settings-learning";
 import "./settings/rs-settings-reset";
 import "./settings/rs-settings-orphans";
+import "./settings/rs-settings-house";
 
 type FieldValues = Record<string, unknown>;
 
@@ -80,12 +85,29 @@ const plantSync: SettingSync = {
   write: writePlantFields,
 };
 
+/** HouseConfig needs its live override fields even when only defaults are available. */
+const houseDefaultConfig: HouseConfig = {
+  ...HOUSE_DEFAULTS,
+  override_heat: null,
+  override_cool: null,
+  override_until: null,
+  override_type: null,
+};
+
+/** The house block goes out and comes in as one partial block, like central_plant. */
+const houseSync: SettingSync = {
+  fields: ["house"],
+  read: (value) => ({ house: (value as HouseConfig | undefined) ?? houseDefaultConfig }),
+  write: (v) => v.house,
+};
+
 /**
  * Every setting the page edits. A save sends only the settings whose fields changed here, so a
  * value switched elsewhere meanwhile (vacation switch, climate control switch #291, dashboard
  * floors) is not written back stale; settings fed by several fields go out together.
  */
 const SETTINGS: [keyof GlobalSettings, SettingSync][] = [
+  ["house", houseSync],
   ["group_by_floor", plain("groupByFloor", false)],
   ["climate_control_active", plain("climateControlActive", true)],
   ["learning_disabled_rooms", plain("learningDisabledRooms", [])],
@@ -165,12 +187,16 @@ export class RsSettings extends LitElement {
   @property({ attribute: false }) public rooms: Record<string, RoomConfig> = {};
   @property({ attribute: false }) public roomsWithoutArea: RoomWithoutArea[] = [];
   @property({ attribute: false }) public priceStatus: PriceStatus | null = null;
+  /** Live house block from rooms/list (dashboard hero and following count). */
+  @property({ attribute: false }) public houseLive: HouseLive | null = null;
   /** Requested category (from the URL); unknown or unavailable ones fall back. */
   @property({ type: String }) public category = "";
   /** List and panel side by side; otherwise list, then the panel as a subpage. */
   @property({ type: Boolean }) public wide = true;
   @state() private _deletedOrphans: ReadonlySet<string> = new Set();
 
+  @state() private _house: HouseConfig = houseDefaultConfig;
+  @state() private _houseBusy = false;
   @state() private _groupByFloor = false;
   @state() private _climateControlActive = true;
   @state() private _learningDisabledRooms: string[] = [];
@@ -450,6 +476,17 @@ export class RsSettings extends LitElement {
 
   private _renderPanel(id: SettingsCategoryId) {
     switch (id) {
+      case "house":
+        return html`<rs-settings-house
+          .hass=${this.hass}
+          .house=${this._house}
+          .houseLive=${this.houseLive}
+          .rooms=${this.rooms}
+          .error=${this._saveError}
+          .busy=${this._houseBusy}
+          @setting-changed=${this._onSettingChanged}
+          @room-independent=${this._onRoomIndependent}
+        ></rs-settings-house>`;
       case "orphans":
         return html`<rs-settings-orphans
           .hass=${this.hass}
@@ -580,6 +617,13 @@ export class RsSettings extends LitElement {
     const off = localize("settings.summary.off", l);
     const count = (n: number) => formatNumber(n, this.hass);
     switch (id) {
+      case "house": {
+        if (!this._house.enabled) return { text: off, on: false };
+        const n =
+          this.houseLive?.following_rooms ??
+          Object.values(this.rooms).filter((r) => r.follow_house !== false && !r.is_outdoor).length;
+        return { text: followingRoomsLabel(n, l), on: true };
+      }
       case "orphans": {
         const names = this._visibleOrphans().map((r) => r.display_name || r.area_id);
         return {
@@ -807,6 +851,31 @@ export class RsSettings extends LitElement {
     this._autoSave();
   }
 
+  private async _onRoomIndependent(e: CustomEvent<{ areaId: string }>) {
+    this._houseBusy = true;
+    fireSaveStatus(this, "saving");
+    try {
+      await this.hass.callWS({
+        type: "roommind/rooms/save",
+        area_id: e.detail.areaId,
+        follow_house: false,
+      });
+      this._saveError = "";
+      fireSaveStatus(this, "saved");
+      // The panel polls rooms/list; nudge an immediate refresh so the list updates now.
+      this.dispatchEvent(new CustomEvent("room-updated", { bubbles: true, composed: true }));
+    } catch (err) {
+      this._saveError = errorText(
+        err,
+        localize("error.unknown", this.hass.language),
+        this.hass.language,
+      );
+      fireSaveStatus(this, "error");
+    } finally {
+      this._houseBusy = false;
+    }
+  }
+
   private _autoSave() {
     if (this._saveDebounce) clearTimeout(this._saveDebounce);
     this._saveDebounce = setTimeout(() => {
@@ -822,6 +891,21 @@ export class RsSettings extends LitElement {
     const changes: Record<string, unknown> = {};
     for (const [key, sync] of SETTINGS) {
       if (sync.fields.some((f) => sent.has(f))) changes[key] = sync.write(values);
+    }
+    if (sent.has("house") && changes.house) {
+      const code = validateHouseSettings(changes.house as HouseConfig);
+      if (code) {
+        this._saveError = localize(`house.error.${code}` as TranslationKey, this.hass.language);
+        this._settle(sent);
+        if (this._stored) {
+          const stored = this._stored;
+          this._setFields({
+            house: (stored.house as HouseConfig | undefined) ?? houseDefaultConfig,
+          });
+        }
+        fireSaveStatus(this, "error");
+        return;
+      }
     }
     fireSaveStatus(this, "saving");
     this._saving++;

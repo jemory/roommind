@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from homeassistant.util import dt as dt_util
 
+from custom_components.roommind.const import MANUAL_OVERRIDE_TIE_WEIGHT, ROOM_SETTING_TIE_WEIGHT
 from custom_components.roommind.managers import occupancy_manager as occ
 from custom_components.roommind.managers.occupancy_manager import (
     AWAY_PRIORITY_WEIGHT,
@@ -24,7 +25,6 @@ from custom_components.roommind.managers.occupancy_manager import (
     OCCUPANCY_MODE_GUARDRAIL_ONLY,
     OCCUPANCY_MODE_REACTIVE_TREND,
     OCCUPANCY_MODE_SCHEDULE_ASSUMED,
-    OVERRIDE_PRIORITY_WEIGHT,
     TREND_EMA_ALPHA,
     TREND_MATURITY_DAYS,
     VACANCY_GRACE_MINUTES,
@@ -602,8 +602,13 @@ def test_step_room_override_away_vacation_and_window() -> None:
     manager = OccupancyManager()
     room = _reactive_room()
 
+    # An override keeps occupied=1.0 but its weight is the occupancy base plus
+    # the manual tie-break, not a flat 3.0 that outranks occupied rooms.
     override = manager.step_room(hass, "kitchen", room, 0.0, override_active=True)
-    assert (override.effective_occupancy, override.priority_weight) == (1.0, OVERRIDE_PRIORITY_WEIGHT)
+    assert (override.effective_occupancy, override.priority_weight) == (
+        1.0,
+        round(GUARDRAIL_PRIORITY_WEIGHT + MANUAL_OVERRIDE_TIE_WEIGHT, 4),
+    )
 
     away = manager.step_room(hass, "kitchen", room, 30.0, presence_away=True)
     assert (away.effective_occupancy, away.priority_weight) == (0.0, AWAY_PRIORITY_WEIGHT)
@@ -797,10 +802,11 @@ def test_build_priority_series_zero_blocks() -> None:
     assert weights == [] and probs == []
 
 
-def test_build_priority_series_override_wins_per_block() -> None:
+def test_build_priority_series_override_adds_tie_break_per_block() -> None:
     manager = OccupancyManager()
     room = {"occupancy_mode": OCCUPANCY_MODE_GUARDRAIL_ONLY}
     now = 1000.0
+    expected_override = round(GUARDRAIL_PRIORITY_WEIGHT + MANUAL_OVERRIDE_TIE_WEIGHT, 4)
     weights, probs = _series(
         manager,
         room,
@@ -809,7 +815,8 @@ def test_build_priority_series_override_wins_per_block() -> None:
         override_active_at=lambda ts: ts >= now + 2 * 300.0,
     )
     assert weights[:2] == [GUARDRAIL_PRIORITY_WEIGHT, GUARDRAIL_PRIORITY_WEIGHT]
-    assert weights[2:] == [OVERRIDE_PRIORITY_WEIGHT, OVERRIDE_PRIORITY_WEIGHT]
+    assert weights[2:] == [expected_override, expected_override]
+    assert expected_override == 0.13  # base 0.08 + 0.05, never the old flat 3.0
     assert probs == [0.0, 0.0, 1.0, 1.0]
 
 
@@ -910,3 +917,113 @@ def test_build_priority_series_mature_trend_alone_drives_priority() -> None:
     weights, probs = _series(manager, room, 0.0, 3)
     assert probs == pytest.approx([0.9, 0.9, 0.9])
     assert weights == pytest.approx([round(0.08 + 0.92 * 0.9, 4)] * 3)
+
+
+# --------------------------------------------------------------------------- #
+# Occupancy-first arbitration: settings are tie-breaks (T3)
+# --------------------------------------------------------------------------- #
+
+
+def test_override_on_empty_room_loses_to_fully_occupied_room() -> None:
+    """Occupancy decides precedence: an empty override cannot beat a full room."""
+    manager = OccupancyManager()
+    empty = {"occupancy_mode": OCCUPANCY_MODE_GUARDRAIL_ONLY}
+    full = {"occupancy_mode": OCCUPANCY_MODE_FOLLOW_SCHEDULE}
+
+    override_weights, override_probs = _series(manager, empty, 0.0, 1, override_active_at=lambda _ts: True)
+    full_weights, full_probs = _series(manager, full, 0.0, 1)
+
+    # The override's weight is its occupancy base + 0.05, not a flat 3.0.
+    assert override_weights == [round(GUARDRAIL_PRIORITY_WEIGHT + MANUAL_OVERRIDE_TIE_WEIGHT, 4)] == [0.13]
+    assert override_probs == [1.0]  # occupied probability stays 1.0 as before
+    assert full_weights == [1.0] and full_probs == [1.0]
+    assert override_weights[0] < full_weights[0]
+
+
+def test_room_setting_adds_tie_break_and_override_beats_setting() -> None:
+    """schedule +0.02, manual override +0.05, both above the same bare room."""
+    manager = OccupancyManager()
+    room = {"occupancy_mode": OCCUPANCY_MODE_GUARDRAIL_ONLY}
+
+    bare, _ = _series(manager, room, 0.0, 1)
+    scheduled, scheduled_probs = _series(manager, room, 0.0, 1, room_setting_at=lambda _ts: True)
+    overridden, override_probs = _series(
+        manager, room, 0.0, 1, override_active_at=lambda _ts: True, room_setting_at=lambda _ts: True
+    )
+    base = GUARDRAIL_PRIORITY_WEIGHT
+    assert bare == [base]
+    assert scheduled == [round(base + ROOM_SETTING_TIE_WEIGHT, 4)] == [0.1]
+    assert scheduled_probs == [0.0]  # a schedule setting keeps the occupancy probability
+    assert overridden == [round(base + MANUAL_OVERRIDE_TIE_WEIGHT, 4)] == [0.13]
+    assert override_probs == [1.0]
+    assert bare[0] < scheduled[0] < overridden[0]
+
+
+def test_vacant_following_room_with_setting_stays_low() -> None:
+    """A setting on a vacant room stays in the guardrail band, not at 3.0."""
+    manager = OccupancyManager()
+    room = {"occupancy_mode": OCCUPANCY_MODE_FOLLOW_SCHEDULE}
+    weights, probs = _series(
+        manager,
+        room,
+        0.0,
+        3,
+        schedule_active_at=lambda _ts: False,
+        room_setting_at=lambda _ts: True,
+    )
+    expected = round(GUARDRAIL_PRIORITY_WEIGHT + ROOM_SETTING_TIE_WEIGHT, 4)
+    assert weights == [expected] * 3 == [0.1] * 3
+    assert probs == [0.0] * 3
+    assert max(weights) < 1.0  # never the old flat override weight
+
+
+def test_away_vacation_with_and_without_override() -> None:
+    """Away/vacation keeps 0.25; an override still wins inside that branch."""
+    manager = OccupancyManager()
+    room = {"occupancy_mode": OCCUPANCY_MODE_GUARDRAIL_ONLY}
+
+    for kwargs in ({"presence_away": True}, {"vacation_active": True}):
+        weights, probs = _series(manager, room, 0.0, 1, **kwargs)
+        assert weights == [AWAY_PRIORITY_WEIGHT] and probs == [0.0]
+
+        # A setting does not escape away/vacation (branch stays above the setting).
+        weights, probs = _series(manager, room, 0.0, 1, room_setting_at=lambda _ts: True, **kwargs)
+        assert weights == [AWAY_PRIORITY_WEIGHT] and probs == [0.0]
+
+        # An override does: base + 0.05, occupied 1.0.
+        weights, probs = _series(manager, room, 0.0, 1, override_active_at=lambda _ts: True, **kwargs)
+        assert weights == [round(GUARDRAIL_PRIORITY_WEIGHT + MANUAL_OVERRIDE_TIE_WEIGHT, 4)] == [0.13]
+        assert probs == [1.0]
+
+
+def test_step_room_matches_series_at_k0_for_settings() -> None:
+    """step_room's current-cycle weight mirrors build_priority_series at k=0."""
+    hass = _hass_with_states({"binary_sensor.kitchen_motion": "off"})
+    room = _reactive_room()
+    manager = OccupancyManager()
+    now = 1000.0
+    # Settle the dwell model deterministically with a few steps before comparing.
+    for ts in (now - 60.0, now - 30.0):
+        manager.step_room(hass, "kitchen", room, ts)
+    # With a sensor off and no trend, the reactive base is the guardrail floor.
+    base = GUARDRAIL_PRIORITY_WEIGHT
+
+    bare_state = manager.step_room(hass, "kitchen", room, now)
+    scheduled_state = manager.step_room(hass, "kitchen", room, now, room_setting_active=True)
+    override_state = manager.step_room(hass, "kitchen", room, now, override_active=True)
+
+    for state, expected_weight, expected_occupied in (
+        (bare_state, base, 0.0),
+        (scheduled_state, round(base + ROOM_SETTING_TIE_WEIGHT, 4), 0.0),
+        (override_state, round(base + MANUAL_OVERRIDE_TIE_WEIGHT, 4), 1.0),
+    ):
+        weights, probs = _series(
+            manager,
+            room,
+            now,
+            1,
+            override_active_at=(lambda _ts: True) if state is override_state else None,
+            room_setting_at=(lambda _ts: True) if state is scheduled_state else None,
+        )
+        assert state.priority_weight == weights[0] == expected_weight
+        assert state.effective_occupancy == probs[0] == expected_occupied

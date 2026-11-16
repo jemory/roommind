@@ -6,6 +6,7 @@ const out = new URL("../../custom_components/roommind/frontend/", import.meta.ur
 const bundles = [
   ["roommind-panel.js", "roommind-panel"],
   ["roommind-card.js", "roommind-room-card"],
+  ["roommind-card.js", "roommind-house-card"],
 ];
 
 let failed = false;

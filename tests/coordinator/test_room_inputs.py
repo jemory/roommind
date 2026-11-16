@@ -13,6 +13,7 @@ from custom_components.roommind.const import (
     MODE_HEATING,
     MODE_IDLE,
     TARGET_REASON_AWAY,
+    TARGET_REASON_HOUSE,
     TARGET_REASON_OVERRIDE,
     TARGET_REASON_PLANT_OVERRIDE,
     TARGET_REASON_VACANT,
@@ -592,3 +593,166 @@ async def test_the_thermostat_reading_is_used_as_a_room_sensor(harness: Harness)
 
     assert data["rooms"]["living_room"]["current_temp"] == 20.0
     assert data["central_plant"]["house_ref_temp"] == pytest.approx(20.0)
+
+
+# ---------------------------------------------------------------------------
+# House layer (T4)
+# ---------------------------------------------------------------------------
+
+HOUSE_ON = {
+    "house": {
+        "enabled": True,
+        "heat_c": 22.0,
+        "cool_c": 25.0,
+        "eco_heat_c": 16.0,
+        "eco_cool_c": 28.0,
+        "climate_mode": "auto",
+    }
+}
+HOUSE_OFF = {"house": {"enabled": False}}
+
+
+async def test_a_following_room_uses_the_house_band_and_reports_house(harness: Harness):
+    await harness.seed({"living_room": make_room()}, settings=HOUSE_ON)
+
+    data = await harness.cycle()
+
+    room = data["rooms"]["living_room"]
+    assert (room["heat_target"], room["cool_target"]) == (22.0, 25.0)
+    assert room["target_reason"] == TARGET_REASON_HOUSE
+    assert room["house_following"] is True
+
+
+async def test_a_disabled_house_reproduces_v3_parity(harness: Harness):
+    # A schedule gap with no house reports the room's own band and an empty reason.
+    await harness.seed({"living_room": make_room()}, settings=HOUSE_OFF)
+
+    data = await harness.cycle()
+
+    room = data["rooms"]["living_room"]
+    assert (room["heat_target"], room["cool_target"]) == (21.0, 24.0)
+    assert room["target_reason"] == ""
+    assert room["house_following"] is False
+    assert data["house"]["active"] is False
+
+
+async def test_a_room_schedule_with_temps_beats_the_house(harness: Harness):
+    harness.hass.services.async_call = AsyncMock(
+        side_effect=schedule_service(all_week_blocks({"heat_temperature": 19.0, "cool_temperature": 23.0}))
+    )
+    await harness.seed(
+        {"living_room": make_room({"schedules": [{"entity_id": "schedule.living"}]})},
+        settings=HOUSE_ON,
+    )
+    harness.hass.states.set("schedule.living", "on", {})
+
+    data = await harness.cycle()
+
+    room = data["rooms"]["living_room"]
+    # A block carrying temperatures outranks the house and keeps the empty reason.
+    assert (room["heat_target"], room["cool_target"]) == (19.0, 23.0)
+    assert room["target_reason"] == ""
+
+
+async def test_a_room_schedule_gap_falls_back_to_the_house(harness: Harness):
+    # A block without temperatures is a gap: the following room inherits the house.
+    harness.hass.services.async_call = AsyncMock(side_effect=schedule_service(all_week_blocks({})))
+    await harness.seed(
+        {"living_room": make_room({"schedules": [{"entity_id": "schedule.living"}]})},
+        settings=HOUSE_ON,
+    )
+    harness.hass.states.set("schedule.living", "on", {})
+
+    data = await harness.cycle()
+
+    room = data["rooms"]["living_room"]
+    assert (room["heat_target"], room["cool_target"]) == (22.0, 25.0)
+    assert room["target_reason"] == TARGET_REASON_HOUSE
+
+
+async def test_an_independent_room_ignores_the_house(harness: Harness):
+    await harness.seed(
+        {"living_room": make_room({"follow_house": False})},
+        settings=HOUSE_ON,
+    )
+
+    data = await harness.cycle()
+
+    room = data["rooms"]["living_room"]
+    assert (room["heat_target"], room["cool_target"]) == (21.0, 24.0)
+    assert room["target_reason"] == ""
+    assert room["house_following"] is False
+    assert data["house"]["following_rooms"] == 0
+
+
+async def test_a_manual_override_beats_the_house(harness: Harness):
+    await harness.seed(
+        {
+            "living_room": make_room(
+                {
+                    "override_heat": 23.0,
+                    "override_cool": 26.0,
+                    "override_until": time.time() + 3600,
+                    "override_type": "custom",
+                }
+            )
+        },
+        settings=HOUSE_ON,
+    )
+
+    data = await harness.cycle()
+
+    room = data["rooms"]["living_room"]
+    assert (room["heat_target"], room["cool_target"]) == (23.0, 26.0)
+    assert room["target_reason"] == TARGET_REASON_OVERRIDE
+
+
+async def test_vacation_beats_the_house(harness: Harness):
+    await harness.seed(
+        {"living_room": make_room()},
+        settings={**HOUSE_ON, "vacation_until": time.time() + 86400, "vacation_temp": 15.0},
+    )
+
+    data = await harness.cycle()
+
+    room = data["rooms"]["living_room"]
+    assert room["target_reason"] == TARGET_REASON_VACATION
+    assert room["heat_target"] == 15.0
+
+
+async def test_away_beats_the_house(harness: Harness, fake_states):
+    fake_states.set("person.alex", "not_home")
+    await harness.seed(
+        {"living_room": make_room({"presence_persons": ["person.alex"]})},
+        settings={**HOUSE_ON, "presence_enabled": True, "presence_persons": ["person.alex"]},
+    )
+
+    data = await harness.cycle()
+
+    room = data["rooms"]["living_room"]
+    assert room["target_reason"] == TARGET_REASON_AWAY
+    assert room["heat_target"] == 17.0
+
+
+async def test_a_vacant_following_room_is_capped_at_the_house_eco_pair(harness: Harness, fake_states):
+    fake_states.set("binary_sensor.motion", "off")
+    await harness.seed(
+        {
+            "living_room": make_room(
+                {
+                    "occupancy_sensors": ["binary_sensor.motion"],
+                    "occupancy_mode": "reactive_and_trend",
+                    "occupancy_dwell_minutes": 0,
+                }
+            )
+        },
+        settings=HOUSE_ON,
+    )
+
+    data = await harness.cycle()
+
+    room = data["rooms"]["living_room"]
+    assert room["occupancy_vacant"] is True
+    # House band 22/25 capped to the house eco pair 16/28.
+    assert (room["heat_target"], room["cool_target"]) == (16.0, 28.0)
+    assert room["target_reason"] == TARGET_REASON_VACANT

@@ -9,6 +9,7 @@ import type {
   OccupancyMode,
   ScheduleEntry,
   CoverScheduleEntry,
+  HouseLive,
 } from "../types";
 import "./room-detail/rs-room-hero";
 import "./rs-schedule-settings";
@@ -34,6 +35,9 @@ import {
   temperaturesHelp,
 } from "./room-detail/edit-dialog-help";
 import { localize, type TranslationKey } from "../utils/localize";
+import { HOUSE_DEFAULTS } from "../utils/house-settings";
+import { houseModeLabel } from "../utils/house-state";
+import { formatTempLocale } from "../utils/temperature";
 import { errorText } from "../utils/errors";
 import { showToast } from "../utils/toast";
 import { fireSaveStatus } from "../utils/events";
@@ -120,6 +124,7 @@ const ROOM_FIELDS: [string, RoomFieldSync][] = [
     ),
   ],
   ["climate_mode", plain("_climateMode", (c) => c?.climate_mode ?? "auto")],
+  ["follow_house", plain("_followHouse", (c) => c?.follow_house ?? false)],
   ["schedules", plain("_schedules", (c) => c?.schedules ?? [])],
   [
     "schedule_selector_entity",
@@ -211,7 +216,11 @@ export class RsRoomDetail extends LitElement {
   @property({ attribute: false }) public vacationUntil: number | null = null;
   /** Live Central Plant status, so the room hero can name a plant guard that affects it. */
   @property({ attribute: false }) public centralPlant: CentralPlantLive | null = null;
+  /** Live house layer, so a following room can show what it inherits. */
+  @property({ attribute: false }) public house: HouseLive | null = null;
 
+  @state() private _followHouse = false;
+  @state() private _savingFollow = false;
   @state() private _selectedTempSensor = "";
   @state() private _selectedHumiditySensor = "";
   @state() private _selectedOccupancySensors: Set<string> = new Set();
@@ -339,6 +348,26 @@ export class RsRoomDetail extends LitElement {
       .error {
         color: var(--rs-err-text);
         font-size: 13px;
+      }
+
+      .follow-actions {
+        display: flex;
+        padding: 0 var(--rs-space-4) var(--rs-space-3);
+      }
+
+      .inherited {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: var(--rs-space-2) var(--rs-space-4) var(--rs-space-4);
+        font-size: var(--rs-font-sm);
+        color: var(--secondary-text-color);
+      }
+
+      .inherited b {
+        color: var(--primary-text-color);
+        font-weight: 500;
+        font-variant-numeric: tabular-nums;
       }
     `,
   ];
@@ -520,6 +549,7 @@ export class RsRoomDetail extends LitElement {
                 : nothing
             }
           </rs-room-hero>
+          ${outdoor ? nothing : this._renderFollowHouseCard()}
           ${outdoor ? nothing : this._renderControlCard()}
         </div>
         <div class="col right">
@@ -534,6 +564,135 @@ export class RsRoomDetail extends LitElement {
       </div>
       ${this._renderEditDialog()} ${this._renderDeleteDialog()}
     `;
+  }
+
+  /**
+   * Follow house vs Independent. The inherited comfort/eco/mode read-only summary and the two
+   * actions use the house block the panel supplies; without it the room still renders correctly.
+   */
+  private _renderFollowHouseCard() {
+    const l = this.hass.language;
+    const following = this._followHouse;
+    const inherited = this._inheritedTargets();
+    return html`<rs-list-card .heading=${localize("house.title", l)}>
+      <rs-list-row
+        icon=${following ? "mdi:home-thermometer-outline" : "mdi:home-thermometer-off-outline"}
+        .heading=${localize(following ? "house.follow_house" : "house.independent", l)}
+        .secondary=${
+          following
+            ? localize("house.inherited_hint", l)
+            : localize("detail.schedule.dialog_temps", l)
+        }
+      ></rs-list-row>
+      <div class="follow-actions">
+        ${
+          following
+            ? html`<ha-button .disabled=${this._savingFollow} @click=${this._onCustomizeRoom}
+                >${localize("house.customize", l)}</ha-button
+              >`
+            : html`<ha-button .disabled=${this._savingFollow} @click=${this._onFollowHouse}
+                >${localize("house.follow_house", l)}</ha-button
+              >`
+        }
+      </div>
+      ${
+        following
+          ? html`<div class="inherited">
+              <span>${localize("house.mode", l)}: <b>${houseModeLabel(this.house, l)}</b></span>
+              <span
+                >${localize("schedule.column_comfort", l)}:
+                <b>${this._formatInherited(inherited.comfortHeat, inherited.comfortCool)}</b></span
+              >
+              <span
+                >${localize("schedule.column_eco", l)}:
+                <b>${this._formatInherited(inherited.ecoHeat, inherited.ecoCool)}</b></span
+              >
+            </div>`
+          : nothing
+      }
+    </rs-list-card>`;
+  }
+
+  /** Comfort pair comes from the in-force house band, eco from the stored eco pair. */
+  private _inheritedTargets(): {
+    comfortHeat: number;
+    comfortCool: number;
+    ecoHeat: number;
+    ecoCool: number;
+    climateMode: ClimateMode;
+  } {
+    const h = this.house;
+    return {
+      comfortHeat: h?.band.heat_c ?? h?.heat_c ?? HOUSE_DEFAULTS.heat_c ?? 21,
+      comfortCool: h?.band.cool_c ?? h?.cool_c ?? HOUSE_DEFAULTS.cool_c ?? 24,
+      ecoHeat: h?.eco_heat_c ?? HOUSE_DEFAULTS.eco_heat_c,
+      ecoCool: h?.eco_cool_c ?? HOUSE_DEFAULTS.eco_cool_c,
+      climateMode: h?.climate_mode ?? HOUSE_DEFAULTS.climate_mode,
+    };
+  }
+
+  private _formatInherited(heat: number | null, cool: number | null): string {
+    const one = (v: number | null) => (v == null ? "—" : formatTempLocale(v, this.hass, 0, 1));
+    return `${one(heat)} / ${one(cool)}`;
+  }
+
+  /** Seed the room's own values from what it currently inherits, then save it as independent. */
+  private async _onCustomizeRoom() {
+    if (this._savingFollow) return;
+    const inherited = this._inheritedTargets();
+    this._comfortHeat = inherited.comfortHeat ?? this._comfortHeat;
+    this._comfortCool = inherited.comfortCool ?? this._comfortCool;
+    this._ecoHeat = inherited.ecoHeat;
+    this._ecoCool = inherited.ecoCool;
+    this._climateMode = inherited.climateMode;
+    this._followHouse = false;
+    await this._saveFollow({
+      follow_house: false,
+      comfort_heat: this._comfortHeat,
+      comfort_cool: this._comfortCool,
+      eco_heat: this._ecoHeat,
+      eco_cool: this._ecoCool,
+      climate_mode: this._climateMode,
+    });
+  }
+
+  private async _onFollowHouse() {
+    if (this._savingFollow) return;
+    this._followHouse = true;
+    await this._saveFollow({ follow_house: true });
+  }
+
+  /** Dedicated immediate save for the follow toggle; normal edits keep using _autoSave. */
+  private async _saveFollow(changes: Record<string, unknown>) {
+    if (this._saveDebounce) {
+      clearTimeout(this._saveDebounce);
+      this._saveDebounce = undefined;
+    }
+    this._savingFollow = true;
+    fireSaveStatus(this, "saving");
+    this._error = "";
+    try {
+      await this.hass.callWS({
+        type: "roommind/rooms/save",
+        area_id: this.area.area_id,
+        ...changes,
+      });
+      if (this._storedArea === this.area.area_id) {
+        this._stored = { ...(this._stored ?? {}), ...changes };
+        const at = Date.now();
+        for (const [key, value] of Object.entries(changes))
+          this._unconfirmed.set(key, { value, at });
+      }
+      this._dirty = false;
+      fireSaveStatus(this, "saved");
+      this.dispatchEvent(new CustomEvent("room-updated", { bubbles: true, composed: true }));
+    } catch (err: unknown) {
+      const l = this.hass.language;
+      this._error = errorText(err, localize("room.error_save_fallback", l), l);
+      fireSaveStatus(this, "error");
+    } finally {
+      this._savingFollow = false;
+    }
   }
 
   private _renderControlCard() {
@@ -810,10 +969,13 @@ export class RsRoomDetail extends LitElement {
             .ecoHeat=${this._ecoHeat}
             .ecoCool=${this._ecoCool}
             .climateMode=${this._climateMode}
+            .following=${this._followHouse}
+            .inherited=${this._inheritedTargets()}
             @comfort-heat-changed=${this._onComfortHeatChanged}
             @comfort-cool-changed=${this._onComfortCoolChanged}
             @eco-heat-changed=${this._onEcoHeatChanged}
             @eco-cool-changed=${this._onEcoCoolChanged}
+            @customize-room=${this._onCustomizeRoomFromDialog}
           ></rs-target-temps>
         </rs-edit-dialog>`;
       case "price":
@@ -1005,6 +1167,12 @@ export class RsRoomDetail extends LitElement {
   private _onScheduleSelectorChanged(e: CustomEvent<{ value: string }>) {
     this._scheduleSelectorEntity = e.detail.value;
     this._autoSave();
+  }
+
+  /** The temperatures dialog's "Customize this room" closes the dialog and seeds from the house. */
+  private _onCustomizeRoomFromDialog() {
+    this._closeEdit();
+    void this._onCustomizeRoom();
   }
 
   private _onComfortHeatChanged(e: CustomEvent<{ value: number }>) {

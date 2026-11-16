@@ -76,7 +76,7 @@ RoomMind estimates solar irradiance from sun position and weather data, per wind
 
 ### Room Priority
 
-Comfort is weighted by **Room Priority**: an occupied room, an upcoming Occupancy Trend and an active override raise a room's weight; an empty room falls back to a small guardrail weight. The plan spends the plant's output where it buys the most comfort, and it will not run the furnace for a room nobody is in.
+Comfort is weighted by **Room Priority**, and occupancy arbitrates between rooms that carry a setting. A room setting — its own schedule block, or a manual override — carries the room's occupancy-derived Room Priority from live sensors and the learned Occupancy Trend, so an occupied room with a setting outranks an empty one; within the same occupancy tier a manual override outranks a room schedule. When no room has a setting, occupancy decides which room gets the house target. An empty room falls back to a small guardrail weight and stays on its eco/guardrail band, so the plan spends the plant's output where it buys the most comfort, and it will not run the furnace for a room nobody is in.
 
 ### Occupancy dwell
 
@@ -92,17 +92,17 @@ A PIR sensor cannot see someone sleeping. In the `schedule_assumed_when_on` occu
 
 ### Guardrail Band
 
-Every controlled room keeps a **Guardrail Band** (16..28 °C by default). An empty room is not comfort-controlled, but it never drifts to an extreme temperature either: if it leaves the band, the plan acts. That protects pipes, plants and furniture without paying for comfort in unused rooms.
+Every controlled room keeps a **Guardrail Band** (16..28 °C by default). An empty room is not comfort-controlled, but it never drifts to an extreme temperature either: if it leaves the band, the plan acts. An empty following room carries the house eco pair instead of the house comfort pair; the Guardrail Band still bounds it where that eco pair would not. That protects pipes, plants and furniture without paying for comfort in unused rooms.
 
 ### Presence, vacation and eco when empty
 
-- **Presence away**: when every tracked person is away, rooms go to their eco targets (or are switched off, if that is the configured away action), and the plant is not run for comfort.
+- **Presence away**: when every tracked person is away, rooms go to their eco targets (or are switched off, if that is the configured away action), and the plant is not run for comfort. A following room goes to the house eco pair; a room with its own settings keeps them.
 - **Vacation**: one fixed setback temperature for all rooms until an end date.
-- **Eco when the room is empty**: with live occupancy in charge, an empty room drops to eco once the delay has passed and returns to its schedule the moment someone is detected.
+- **Eco when the room is empty**: with live occupancy in charge, an empty room drops to eco once the delay has passed and returns to its schedule the moment someone is detected. A following room drops to the house eco pair, not the house comfort pair.
 
 ### Manual override
 
-A comfort, eco or custom-temperature override holds until the next schedule change, and the plan re-prioritizes the room while it lasts. An override lifts the outdoor temperature limits for the plant while it is active.
+A comfort, eco or custom-temperature override holds until the next schedule change, and the plan re-prioritizes the room while it lasts. An override lifts the outdoor temperature limits for the plant while it is active. A room manual override outranks the house layer for that room; a hold set from the house climate entity is a House Override, one rung below a room schedule block, and "Resume schedule" clears it.
 
 ### Changes on the central thermostat
 
@@ -168,6 +168,16 @@ What the automation does:
 Cover decisions also use the plant's plan: if shading changes how much the plan expects to heat or cool, the covers react to that, not only to the raw solar estimate. A south-facing room can therefore be shaded *before* the compressor starts, instead of cooling the sun's heat with electricity.
 
 ## Schedules and targets
+
+### House target and house schedule
+
+The house has a comfort pair (heat/cool) and an eco pair of its own, the **House Target**, set in the new **House** settings category next to the house climate mode, preheat, price shift and the enable switch. The optional **House Schedule** is built from Home Assistant `schedule.*` helper(s) with a selector entity, so the house target moves through the day like a room schedule does; the Schedules tab marks the bound helper with a **House** badge and blocks deleting it while it is bound.
+
+On an upgrade the house layer starts disabled, so nothing changes until you set a house target. A fresh install starts enabled at 21/24 °C comfort with 17/27 °C eco.
+
+### Following the house
+
+Every room has **Follow house** (on by default). A following room inherits the house comfort pair, the house eco pair, the house climate mode, the house schedule, preheat and price shift. A room with its own settings — its own schedule block, or a manual override — outranks the house for that room, and setting a room to Independent gives it the v3.0.0 behaviour exactly: its own comfort, eco, schedule and gaps.
 
 ### Schedules
 

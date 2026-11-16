@@ -40,6 +40,32 @@ _Avoid_: Device group, managed room
 The representative indoor air temperature of the conditioned home as a whole, against which individual rooms exchange heat passively and during Circulation.
 _Avoid_: Return plenum temperature, master temperature
 
+> The **House Reference Temperature** is a measured quantity, the mean of the conditioned rooms. It is not a setting and it is not the **House Target**, which is a household comfort setting chosen by the occupant. The plan works against the first and follows the second.
+
+**House Target**:
+The household comfort setting for the whole home, a heating and a cooling target that every following room inherits unless it carries a setting of its own.
+_Avoid_: Whole-home setpoint, master thermostat, house temperature
+
+**House Schedule**:
+A home assistant schedule helper, or a set of them selected by a selector entity, whose blocks move the House Target through the day for following rooms.
+_Avoid_: House program, master schedule, thermostat timetable
+
+**House Eco**:
+The household eco pair, the heating and cooling targets a following room runs on while it is empty, standing in place of the House Target for that room.
+_Avoid_: House setback, whole-home away mode, household eco mode
+
+**Room Target**:
+The comfort heating and cooling targets in force for one Thermal Zone, inherited from the House Target when the room follows the house and taken from the room's own settings otherwise.
+_Avoid_: Zone setpoint, per-room reference, local house target
+
+**Follow House**:
+The per-room setting that binds a Thermal Zone to the House Target, the House Eco pair, the house climate mode, the House Schedule, preheat and price shift.
+_Avoid_: House lock, whole-home sync, master follow
+
+**Independent Room**:
+A Thermal Zone set to keep its own comfort and eco targets, its own schedule blocks and its own gaps, with no inheritance from the house layer.
+_Avoid_: Detached zone, orphan room, standalone room
+
 **Exterior Opening**:
 A window or exterior door connecting a Thermal Zone to outdoor air, causing rapid envelope loss when open.
 _Avoid_: Contact sensor, door/window sensor

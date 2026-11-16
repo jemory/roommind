@@ -1,6 +1,6 @@
 import { LitElement, html, css, nothing, type PropertyValues } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
-import type { ClimateMode, HomeAssistant, RoomConfig } from "../../types";
+import type { ClimateMode, HomeAssistant, HouseLive, RoomConfig } from "../../types";
 import { localize } from "../../utils/localize";
 import { errorText } from "../../utils/errors";
 import { showToast } from "../../utils/toast";
@@ -103,9 +103,22 @@ export class RsScheduleEditor extends LitElement {
   /** Room the editor was opened from ("" for a deep link without room). */
   @property({ type: String }) public roomId = "";
   @property({ attribute: false }) public rooms: Record<string, RoomConfig> = {};
+  /** The live house layer; a helper bound to it is managed from House settings. */
+  @property({ attribute: false }) public house: HouseLive | null = null;
   /** "cover" for a cover schedule, "climate" for a room temperature one, "" = from its use. */
   @property({ type: String }) public kind: "" | "climate" | "cover" = "";
   @property({ type: String }) public scheduleOffAction: "eco" | "off" = "eco";
+
+  /** True when this helper is bound to the house layer (it cannot be deleted here). */
+  private get _houseBound(): boolean {
+    const house = this.house;
+    if (!house) return false;
+    const bound = new Set<string>([
+      house.schedule_entity,
+      ...(house.schedules ?? []).map((entry) => entry.entity_id),
+    ]);
+    return bound.has(this.entityId);
+  }
 
   @state() private _loaded: LoadedSchedule | null = null;
   @state() private _loadError = "";
@@ -1210,6 +1223,19 @@ export class RsScheduleEditor extends LitElement {
 
   private _renderDeleteRow(users: UsingRoom[]) {
     const l = this.hass.language;
+    if (this._houseBound) {
+      // The house layer owns this helper: House settings is where the binding is
+      // changed, so deleting it here would silently drop the household schedule.
+      return html`<rs-list-card>
+        <rs-list-row
+          plain-icon
+          variant="warn"
+          icon="mdi:home-lock"
+          .heading=${localize("house.schedule_badge", l)}
+          .secondary=${localize("house.inherited_hint", l)}
+        ></rs-list-row>
+      </rs-list-card>`;
+    }
     const others = users.filter((u) => u.id !== this.roomId);
     return html`<rs-list-card>
       <rs-list-row
@@ -1825,6 +1851,12 @@ export class RsScheduleEditor extends LitElement {
   private async _delete() {
     const itemId = this._loaded?.itemId;
     if (!itemId) return;
+    // A house-bound helper is managed in House settings; never delete it from here.
+    if (this._houseBound) {
+      this._dialog = null;
+      this._dialogError = "";
+      return;
+    }
     this._busy = true;
     this._dialogError = "";
     // No update may follow the delete: drop the pending change, wait for a running save.

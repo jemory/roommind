@@ -7,18 +7,22 @@ from unittest.mock import AsyncMock
 import pytest
 
 from custom_components.roommind.const import (
+    CLIMATE_MODE_AUTO,
     DEFAULT_CENTRAL_PLANT_SETTINGS,
     DEFAULT_CO2_THRESHOLD,
     DEFAULT_COMFORT_COOL,
     DEFAULT_COMFORT_HEAT,
     DEFAULT_ECO_COOL,
     DEFAULT_ECO_HEAT,
+    DEFAULT_HOUSE_SETTINGS,
     OCCUPANCY_MODE_FOLLOW_SCHEDULE,
     OCCUPANCY_MODE_REACTIVE_TREND,
     OCCUPANCY_MODE_SCHEDULE_ASSUMED,
+    fresh_house_settings,
 )
 from custom_components.roommind.store import (
     RETIRED_ROOM_KEYS,
+    STORAGE_VERSION,
     _RoomMindHaStore,
     migrate_store_data,
     strip_retired_room_keys,
@@ -492,10 +496,10 @@ async def test_async_migrate_func_returns_migrated_data(store):
 
 
 @pytest.mark.asyncio
-async def test_settings_default_to_empty(store):
+async def test_settings_default_to_the_fresh_house_block(store):
     await store.async_load()
 
-    assert store.get_settings() == {}
+    assert store.get_settings() == {"house": fresh_house_settings()}
 
 
 @pytest.mark.asyncio
@@ -541,7 +545,11 @@ async def test_orphaned_settings_are_dropped_on_load(store):
 
     await store.async_load()
 
-    assert store.get_settings() == {"central_plant": DEFAULT_CENTRAL_PLANT_SETTINGS, "keep": True}
+    assert store.get_settings() == {
+        "central_plant": DEFAULT_CENTRAL_PLANT_SETTINGS,
+        "house": DEFAULT_HOUSE_SETTINGS,
+        "keep": True,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -613,7 +621,7 @@ async def test_an_empty_store_load_clears_everything(store):
     await store.async_load()
 
     assert store.get_rooms() == {}
-    assert store.get_settings() == {}
+    assert store.get_settings() == {"house": fresh_house_settings()}
     assert store.get_thermal_data() == {}
     assert store.get_occupancy_trends() == {}
 
@@ -637,3 +645,119 @@ async def test_a_current_store_is_not_saved_again_on_load(store):
     await store.async_load()
 
     store._store.async_save.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# House settings block (v3)
+# ---------------------------------------------------------------------------
+
+
+def test_migrate_store_data_adds_an_inert_house_block():
+    """A v2 payload gains the house block with every default key, disabled."""
+    migrated = migrate_store_data({"rooms": {}, "settings": {}})
+
+    house = migrated["settings"]["house"]
+    assert house == DEFAULT_HOUSE_SETTINGS
+    assert house["enabled"] is False
+    assert set(house) == set(DEFAULT_HOUSE_SETTINGS)
+
+
+def test_migrate_store_data_is_idempotent_for_the_house_block():
+    raw = {
+        "rooms": {"living_room": {"area_id": "living_room", "comfort_temp": 22.5, "override_temp": 23.0}},
+        "settings": {"heating_threshold": 1.0, "compressor_groups": []},
+    }
+
+    once = migrate_store_data(raw)
+    twice = migrate_store_data(once)
+
+    assert once == twice
+
+
+def test_migrate_store_data_completes_a_partial_house_block_but_keeps_user_values():
+    """A v3 payload with a partial house block is filled out, user values kept."""
+    migrated = migrate_store_data(
+        {"rooms": {}, "settings": {"house": {"enabled": True, "heat_c": 20.5, "climate_mode": "heat_only"}}}
+    )
+
+    house = migrated["settings"]["house"]
+    assert house["enabled"] is True
+    assert house["heat_c"] == 20.5
+    assert house["climate_mode"] == "heat_only"
+    for key, value in DEFAULT_HOUSE_SETTINGS.items():
+        if key in ("enabled", "heat_c", "climate_mode"):
+            continue
+        assert house[key] == value, key
+
+
+@pytest.mark.asyncio
+async def test_fresh_async_load_seeds_enabled_house_settings(store):
+    store._store.async_load = AsyncMock(return_value=None)
+
+    await store.async_load()
+
+    house = store.get_settings()["house"]
+    assert house["enabled"] is True
+    assert house["heat_c"] == DEFAULT_COMFORT_HEAT
+    assert house["cool_c"] == DEFAULT_COMFORT_COOL
+
+
+@pytest.mark.asyncio
+async def test_save_settings_merges_a_partial_house_block(store):
+    await store.async_load()
+
+    await store.async_save_settings({"house": {"heat_c": 22.0}})
+
+    house = store.get_settings()["house"]
+    assert house["heat_c"] == 22.0
+    assert house["enabled"] is True
+    for key, value in fresh_house_settings().items():
+        if key == "heat_c":
+            continue
+        assert house[key] == value, key
+
+
+@pytest.mark.asyncio
+async def test_async_save_settings_does_not_mutate_the_callers_dict(store):
+    await store.async_load()
+    changes = {"house": {"heat_c": 22.0}}
+
+    await store.async_save_settings(changes)
+
+    assert changes == {"house": {"heat_c": 22.0}}
+
+
+def test_storage_version_is_3():
+    assert STORAGE_VERSION == 3
+
+
+def test_house_settings_defaults_match_the_central_plant_pattern():
+    """Sanity-check the frozen contract values of the house defaults."""
+    assert DEFAULT_HOUSE_SETTINGS["eco_heat_c"] == DEFAULT_ECO_HEAT
+    assert DEFAULT_HOUSE_SETTINGS["eco_cool_c"] == DEFAULT_ECO_COOL
+    assert DEFAULT_HOUSE_SETTINGS["climate_mode"] == CLIMATE_MODE_AUTO
+    assert DEFAULT_HOUSE_SETTINGS["schedules"] == []
+    assert DEFAULT_HOUSE_SETTINGS["schedule_selector_entity"] == ""
+    assert DEFAULT_HOUSE_SETTINGS["preheat_enabled"] is True
+    assert DEFAULT_HOUSE_SETTINGS["price_shift"] == 0.0
+    for key in ("heat_c", "cool_c", "override_heat", "override_cool", "override_until", "override_type"):
+        assert DEFAULT_HOUSE_SETTINGS[key] is None
+
+
+@pytest.mark.asyncio
+async def test_migrating_a_store_with_a_house_block_keeps_user_values(store):
+    store._store.async_load = AsyncMock(
+        return_value={
+            "rooms": {},
+            "settings": {"house": {"enabled": True, "heat_c": 20.0}},
+            "thermal_data": {},
+        }
+    )
+
+    await store.async_load()
+
+    house = store.get_settings()["house"]
+    assert house["enabled"] is True
+    assert house["heat_c"] == 20.0
+    assert house["cool_c"] is None
+    assert house["eco_heat_c"] == DEFAULT_ECO_HEAT

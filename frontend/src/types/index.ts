@@ -279,6 +279,8 @@ export interface RoomConfig {
   ignore_presence?: boolean;
   is_outdoor?: boolean;
   climate_control_enabled?: boolean;
+  /** False keeps the room on its own comfort/eco/schedule instead of the house layer. */
+  follow_house?: boolean;
   live?: RoomLiveData;
 }
 
@@ -292,6 +294,44 @@ export interface PriceStatus {
   forecast_hours: number;
   history_hours: number;
   history_needed: number;
+}
+
+/**
+ * The household base layer every following room inherits: a comfort pair, an eco
+ * pair, a climate mode, an optional schedule and a price shift.
+ */
+export interface HouseConfig {
+  enabled: boolean;
+  heat_c: number | null;
+  cool_c: number | null;
+  eco_heat_c: number;
+  eco_cool_c: number;
+  climate_mode: ClimateMode;
+  schedules: ScheduleEntry[];
+  schedule_selector_entity: string;
+  preheat_enabled: boolean;
+  price_shift: number;
+  override_heat: number | null;
+  override_cool: number | null;
+  override_until: number | null;
+  override_type: OverrideType | null;
+}
+
+/**
+ * The house layer as the coordinator publishes it: the resolved settings plus what
+ * is in force right now. `band` is the target following rooms inherit; `source`
+ * says which rung of the house layer produced it.
+ */
+export interface HouseLive extends HouseConfig {
+  active: boolean;
+  band: { heat_c: number | null; cool_c: number | null };
+  source: "override" | "schedule" | "target" | null;
+  override_active: boolean;
+  schedule_entity: string;
+  schedule_name: string;
+  schedule_block: { from: string; to: string } | null;
+  next_change: number | null;
+  following_rooms: number;
 }
 
 export interface GlobalSettings {
@@ -328,6 +368,8 @@ export interface GlobalSettings {
   mold_prevention_notify_targets?: NotificationTarget[];
   /** The single shared forced-air plant (thermostat, guards, fallback band). */
   central_plant?: CentralPlantConfig;
+  /** The household base layer; missing/inert until the occupant sets a house target. */
+  house?: HouseConfig;
   room_order?: string[];
   group_by_floor?: boolean;
   boost_applied_at?: Record<string, number>;

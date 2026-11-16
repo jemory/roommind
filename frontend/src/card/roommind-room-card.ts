@@ -28,6 +28,7 @@ import {
   type RoomTemps,
 } from "../utils/override";
 import { refreshRooms, setFeedHass, subscribeRooms, type RoomsFeed } from "./rooms-feed";
+import { formatHouseTarget } from "../utils/house-state";
 
 export interface RoomCardConfig {
   type: string;
@@ -181,6 +182,15 @@ export class RoomMindRoomCard extends LitElement {
   private get _room(): RoomConfig | undefined {
     const area = this._config?.area;
     return area ? this._feed?.rooms[area] : undefined;
+  }
+
+  /**
+   * A room inherits the house target unless it was explicitly made independent.
+   * Older backends report the live `house_following` flag without the config field.
+   */
+  private _followsHouse(room: RoomConfig): boolean {
+    const liveFollowing = (room.live as unknown as { house_following?: unknown })?.house_following;
+    return room.follow_house !== false || liveFollowing === true;
   }
 
   private _climateMode(room: RoomConfig): ClimateMode {
@@ -350,15 +360,35 @@ export class RoomMindRoomCard extends LitElement {
           : st?.tone === "circulating"
             ? "mode-circulating"
             : "mode-idle";
+    const following = this._followsHouse(room);
     return html`
       <div class="header">
         ${this._renderName(room.area_id, room)}
         ${
-          st
-            ? html`<span class="mode-pill ${cls}">
-                <span class="mode-dot"></span>
-                ${localize(st.key, this._lang)}${
-                  st.power != null ? ` · ${formatPercent(st.power, { language: this._lang })}` : ""
+          st || following
+            ? html`<span class="header-pills">
+                ${
+                  st
+                    ? html`<span class="mode-pill ${cls}">
+                        <span class="mode-dot"></span>
+                        ${localize(st.key, this._lang)}${
+                          st.power != null
+                            ? ` · ${formatPercent(st.power, { language: this._lang })}`
+                            : ""
+                        }
+                      </span>`
+                    : nothing
+                }
+                ${
+                  following
+                    ? html`<span
+                        class="mode-pill following-pill"
+                        title=${localize("house.inherited_hint", this._lang)}
+                      >
+                        <ha-icon icon="mdi:home-outline" aria-hidden="true"></ha-icon>
+                        ${localize("house.follow_house", this._lang)}
+                      </span>`
+                    : nothing
                 }
               </span>`
             : nothing
@@ -455,6 +485,15 @@ export class RoomMindRoomCard extends LitElement {
                 aria-hidden="true"
               ></ha-icon>
               <span>${localize(OVERRIDE_KEYS[ov.type], l)} · ${remaining}</span>
+            </div>`
+          : nothing
+      }
+      ${
+        this._followsHouse(room) && this._feed?.house
+          ? html`<div class="hint inherited-hint" title=${localize("house.inherited_hint", l)}>
+              <ha-icon icon="mdi:home-outline" aria-hidden="true"></ha-icon>
+              ${localize("house.follow_house", l)} ·
+              ${formatHouseTarget(this._feed.house, this.hass)}
             </div>`
           : nothing
       }
@@ -870,6 +909,9 @@ export class RoomMindRoomCard extends LitElement {
     const area = this._config?.area;
     if (!t || !area) return;
     const edit = this._tempsEdit;
+    // Editing a following room's own targets is an explicit opt-out of the house layer.
+    const room = this._room;
+    const wasFollowing = !!room && this._followsHouse(room);
     try {
       await this.hass.callWS({
         type: "roommind/rooms/save",
@@ -878,6 +920,7 @@ export class RoomMindRoomCard extends LitElement {
         comfort_cool: t.comfortCool,
         eco_heat: t.ecoHeat,
         eco_cool: t.ecoCool,
+        ...(wasFollowing ? { follow_house: false } : {}),
       });
       await refreshRooms(true);
     } catch (err) {
@@ -969,6 +1012,31 @@ export class RoomMindRoomCard extends LitElement {
       .mode-dot {
         width: 7px;
         height: 7px;
+      }
+
+      .header-pills {
+        display: inline-flex;
+        align-items: center;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 6px;
+        min-width: 0;
+      }
+
+      .following-pill {
+        color: var(--secondary-text-color);
+        background: var(--rs-fill);
+      }
+
+      .following-pill ha-icon,
+      .inherited-hint ha-icon {
+        --mdc-icon-size: 14px;
+      }
+
+      .inherited-hint {
+        display: flex;
+        align-items: center;
+        gap: 4px;
       }
 
       .temps {

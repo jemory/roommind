@@ -6,6 +6,7 @@ import type {
   PriceStatus,
   RoomConfig,
   RoomWithoutArea,
+  HouseLive,
 } from "./types";
 import { loadHaElements } from "./load-ha-elements";
 import { noteServerTime } from "./utils/server-clock";
@@ -84,6 +85,8 @@ export class RoomMindPanel extends LitElement {
   @state() private _priceStatus: PriceStatus | null = null;
   /** Live Central Plant status; null until the backend reports it. */
   @state() private _centralPlant: CentralPlantLive | null = null;
+  /** Live house block from rooms/list, passed to the dashboard hero and settings. */
+  @state() private _house: HouseLive | null = null;
   @state() private _anyoneHome = true;
   @state() private _presencePersons: string[] = [];
   @state() private _presenceAwayAction: "eco" | "off" = "eco";
@@ -485,6 +488,7 @@ export class RoomMindPanel extends LitElement {
         .roomId=${this._scheduleRoom}
         .kind=${this._scheduleKind}
         .rooms=${this._rooms}
+        .house=${this._house}
         .scheduleOffAction=${this._scheduleOffAction}
         @schedule-closed=${this._onScheduleClosed}
       ></rs-schedule-editor>`;
@@ -599,6 +603,7 @@ export class RoomMindPanel extends LitElement {
       .climateControlActive=${common.climateControlActive}
       .summary=${summary}
       .centralPlant=${this._centralPlant}
+      .house=${this._house}
       @area-selected=${this._onAreaSelected}
       @room-updated=${this._onRoomUpdated}
       @edit-requested=${this._startEditing}
@@ -612,6 +617,7 @@ export class RoomMindPanel extends LitElement {
       .rooms=${this._rooms}
       .roomsWithoutArea=${this._roomsWithoutArea}
       .priceStatus=${this._priceStatus}
+      .houseLive=${this._house}
       .category=${this._settingsCategory}
       .wide=${this._wide}
       @settings-category-changed=${this._onSettingsCategoryChanged}
@@ -685,6 +691,7 @@ export class RoomMindPanel extends LitElement {
         price_entity?: string;
         price_status?: PriceStatus | null;
         central_plant?: CentralPlantLive | null;
+        house?: HouseLive | null;
         anyone_home: boolean;
         presence_persons: string[];
         presence_away_action: "eco" | "off";
@@ -714,6 +721,7 @@ export class RoomMindPanel extends LitElement {
       this._priceEntity = result.price_entity ?? "";
       this._priceStatus = result.price_status ?? null;
       this._centralPlant = result.central_plant ?? null;
+      this._house = result.house ?? null;
       this._anyoneHome = result.anyone_home ?? true;
       this._presencePersons = result.presence_persons ?? [];
       this._presenceAwayAction = result.presence_away_action ?? "eco";

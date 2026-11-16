@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
+from ..const import MANUAL_OVERRIDE_TIE_WEIGHT, ROOM_SETTING_TIE_WEIGHT
 from ..utils import presence_utils
 
 # Occupancy modes (per room, ``room["occupancy_mode"]``).
@@ -45,8 +46,8 @@ DEFAULT_DWELL_MINUTES = 3.0
 DEFAULT_ECO_DELAY_MINUTES = 15.0
 VACANCY_GRACE_MINUTES = 2.0
 
-# Room Priority weights.
-OVERRIDE_PRIORITY_WEIGHT = 3.0
+# Room Priority weights.  Occupancy-derived weights and the tie-break bumps come
+# from ``const``; only the fixed competition/freeze weights remain here.
 AWAY_PRIORITY_WEIGHT = 0.25
 GUARDRAIL_PRIORITY_WEIGHT = 0.08
 FREEZE_PROTECTION_TEMP_C = 7.0
@@ -488,10 +489,17 @@ class OccupancyManager:
         presence_away: bool = False,
         vacation_active: bool = False,
         override_active: bool = False,
+        room_setting_active: bool = False,
         window_open: bool = False,
         current_temp_c: float | None = None,
     ) -> RoomOccupancyState:
-        """Read live occupancy and return the room's current occupancy state."""
+        """Read live occupancy and return the room's current occupancy state.
+
+        Occupancy decides precedence: a manual override or a room schedule
+        setting only adds a small tie-break bump to the room's occupancy-derived
+        weight (see :meth:`build_priority_series`).  Away/vacation and window
+        protection keep their fixed weights and still short-circuit settings.
+        """
         raw_occupied, has_sensors = read_raw_occupancy(hass, room)
         mode = self.resolve_occupancy_mode(room)
 
@@ -512,7 +520,17 @@ class OccupancyManager:
             freezing = current_temp_c is not None and current_temp_c < FREEZE_PROTECTION_TEMP_C
             weight = FREEZE_PRIORITY_WEIGHT if freezing else 0.0
         elif override_active:
-            effective, weight = 1.0, OVERRIDE_PRIORITY_WEIGHT
+            base_weight, _ = self._mode_values(
+                mode,
+                0,
+                0.0,
+                dwell_score,
+                trend_probability,
+                bool(schedule_active_now),
+                has_sensors,
+            )
+            effective = 1.0
+            weight = round(base_weight + MANUAL_OVERRIDE_TIE_WEIGHT, 4)
         elif vacation_active or (presence_away and not room.get("ignore_presence", False)):
             effective, weight = 0.0, AWAY_PRIORITY_WEIGHT
         else:
@@ -525,6 +543,8 @@ class OccupancyManager:
                 bool(schedule_active_now),
                 has_sensors,
             )
+            if room_setting_active:
+                weight = round(weight + ROOM_SETTING_TIE_WEIGHT, 4)
 
         is_vacant = has_sensors and dwell_score <= 0.01 and mode == OCCUPANCY_MODE_REACTIVE_TREND
         state = RoomOccupancyState(
@@ -550,6 +570,7 @@ class OccupancyManager:
         *,
         schedule_active_at: Callable[[float], bool] | None = None,
         override_active_at: Callable[[float], bool] | None = None,
+        room_setting_at: Callable[[float], bool] | None = None,
         presence_away: bool = False,
         vacation_active: bool = False,
         window_open: bool = False,
@@ -561,6 +582,12 @@ class OccupancyManager:
         Excluded rooms (outdoor, climate control off) and open-window rooms get
         zero priority, except the sub-7 °C freeze emergency which keeps the
         room's guardrail alive at ``FREEZE_PRIORITY_WEIGHT``.
+
+        Otherwise occupancy decides precedence.  A room setting only breaks ties
+        inside one occupancy level: a manual override adds
+        ``MANUAL_OVERRIDE_TIE_WEIGHT`` to the occupancy-derived weight (and keeps
+        ``occupied = 1.0``), a room schedule adds ``ROOM_SETTING_TIE_WEIGHT``.
+        An override outranks away/vacation, while a room schedule does not.
         """
         count = max(0, int(n_blocks))
         zeros = [0.0] * count
@@ -583,7 +610,10 @@ class OccupancyManager:
             t_k = now_ts + k * step_seconds
             schedule_on = True if schedule_active_at is None else bool(schedule_active_at(t_k))
             if override_active_at is not None and override_active_at(t_k):
-                weight, occupied = OVERRIDE_PRIORITY_WEIGHT, 1.0
+                trend_now = 0.0 if model is None else model.weighted_trend_probability(t_k)
+                base_weight, _ = self._mode_values(mode, k, dt_minutes, dwell_now, trend_now, schedule_on, has_sensors)
+                weight = round(base_weight + MANUAL_OVERRIDE_TIE_WEIGHT, 4)
+                occupied = 1.0
             elif vacation_active or (presence_away and not room.get("ignore_presence", False)):
                 weight, occupied = AWAY_PRIORITY_WEIGHT, 0.0
             else:
@@ -591,6 +621,8 @@ class OccupancyManager:
                 weight, occupied = self._mode_values(
                     mode, k, dt_minutes, dwell_now, trend_now, schedule_on, has_sensors
                 )
+                if room_setting_at is not None and room_setting_at(t_k):
+                    weight = round(weight + ROOM_SETTING_TIE_WEIGHT, 4)
             weights.append(weight)
             probabilities.append(occupied)
         return weights, probabilities

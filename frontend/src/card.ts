@@ -6,6 +6,7 @@
  * same custom elements and the second one would fail to load.
  */
 import "./card/roommind-room-card";
+import "./card/roommind-house-card";
 import { localize, uiLanguage } from "./utils/localize";
 
 interface CustomCardEntry {
@@ -27,6 +28,19 @@ if (!w.customCards.some((c) => c.type === "roommind-room-card")) {
     },
     get description() {
       return localize("roomcard.description", uiLanguage());
+    },
+    preview: true,
+    documentationURL: "https://github.com/snazzybean/roommind#dashboard-card",
+  });
+}
+if (!w.customCards.some((c) => c.type === "roommind-house-card")) {
+  w.customCards.push({
+    type: "roommind-house-card",
+    get name() {
+      return localize("housecard.name", uiLanguage());
+    },
+    get description() {
+      return localize("housecard.description", uiLanguage());
     },
     preview: true,
     documentationURL: "https://github.com/snazzybean/roommind#dashboard-card",

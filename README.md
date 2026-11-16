@@ -18,7 +18,7 @@
 
 RoomMind runs the **Central Plant** of a ducted forced-air home from Home Assistant: a gas or electric **furnace** for heating, an air-source **heat pump** for cooling, and the central blower for Circulation — all behind one Wi-Fi **Central Thermostat**. No TRVs, no minisplits: RoomMind learns each **Thermal Zone** with its own Extended Kalman Filter, weighs rooms by **Room Priority**, and decides block by block whether the plant should heat, cool, circulate or idle.
 
-- 🎯 **The right room, on time.** Occupancy-driven **Room Priority** and learned **Occupancy Trends** warm the office before you sit down and leave the guest room on its **Guardrail Band**.
+- 🎯 **The right room, on time.** A house-wide **House Target** with per-room settings on top, occupancy-driven **Room Priority** and learned **Occupancy Trends** warm the office before you sit down and leave the guest room on its **Guardrail Band**.
 - 🌀 **Mix instead of over-condition.** When one room is too warm and another too cool, **Circulation** with the blower alone can equalize them for a fraction of the furnace's or compressor's energy.
 - 🌡️ **Comfort, not just dry-bulb.** **Effective Temperature** accounts for humidity; **Wet-Coil Lockout** keeps a wet evaporator from blowing moisture back into the rooms.
 - 🚪 **Openings that make sense.** An open window pauses the whole home; a closed **Interior Door** turns that into a local problem so the rest of the house keeps heating.
@@ -72,7 +72,11 @@ RoomMind runs the **Central Plant** of a ducted forced-air home from Home Assist
   </tr>
   <tr>
     <td>📊 <b>Insight</b></td>
-    <td>Analytics page with effective temperature, circulation periods, comfort, price and the learned model · <a href="#dashboard-card">dashboard card</a> · <a href="#room-climate-entity">room climate entity</a> for automations, thermostat cards and voice assistants · English, German, French and Italian</td>
+    <td>Analytics page with effective temperature, circulation periods, comfort, price and the learned model · <a href="#dashboard-card">dashboard card</a> · <a href="#room-climate-entity">room climate entity</a> and the <a href="#house-climate-entity">house climate entity</a> for automations, thermostat cards and voice assistants · English, German, French and Italian</td>
+  </tr>
+  <tr>
+    <td>🏡 <b>House layer</b></td>
+    <td>One <b>House Target</b> and eco pair for the whole home · optional <b>House Schedule</b> from Home Assistant <code>schedule.*</code> helpers with a selector entity · house climate mode, preheat and price shift · per-room <b>Follow House</b> with an easy escape hatch to an Independent room</td>
   </tr>
 </table>
 
@@ -102,8 +106,9 @@ RoomMind appears as a panel in the sidebar (for administrators) and shows every 
 1. **Pick the Central Thermostat**: `Settings → Central HVAC → Central thermostat`. It must be the `climate.*` entity that really runs the furnace, the heat pump and the blower. RoomMind nudges its setpoint and reads its `hvac_action` and `fan_mode`; it never needs a second thermostat.
 2. **Set the thermostat's area** so RoomMind knows where the wall unit measures the House Reference Temperature.
 3. **Add a temperature sensor per room** (recommended). A room with its own sensor is a full Thermal Zone: it gets the learned model, occupancy priority and its own share of the plant's air.
-4. **Add a schedule per room**, or pick an existing schedule helper. Blocks decide when comfort applies.
-5. **Set comfort and eco** for heating and cooling, and set the **Fallback Band** (heating floor / cooling ceiling) that stays on the thermostat while the plant is idle.
+4. **Set the House Target** (heat/cool pair) and the house eco pair in `Settings → House`. This is the comfort the whole home starts from. Add an optional **House Schedule** and bind the helper if some hours of the day want something else.
+5. **Add a schedule per room**, or pick an existing schedule helper, only for rooms you want to run differently from the house. Blocks decide when comfort applies.
+6. **Set comfort and eco** for heating and cooling, and set the **Fallback Band** (heating floor / cooling ceiling) that stays on the thermostat while the plant is idle.
 
 RoomMind starts controlling right away.
 
@@ -114,7 +119,7 @@ RoomMind starts controlling right away.
 
 ## Dashboard Card
 
-Put a RoomMind room on any dashboard: Edit dashboard → Add card → **RoomMind room**. The card ships with the integration, no resource needs to be added. After installing or updating RoomMind, reload the browser tab (or restart the companion app) once so the card is found.
+Put a RoomMind room on any dashboard: Edit dashboard → Add card → **RoomMind room**. Put the whole house on one: Add card → **RoomMind house** (`custom:roommind-house-card`), the same visual language as the room card with the house targets, the house schedule and the following rooms. Both cards ship with the integration, no resource needs to be added. After installing or updating RoomMind, reload the browser tab (or restart the companion app) once so the card is found.
 
 It shows the room's temperature, target, humidity and what the plant is doing with that room, plus:
 
@@ -151,10 +156,20 @@ Rooms are never commanded individually. There is one lever — the Central Therm
 ### Target Temperature Priority
 
 ```
-Manual Override > Thermostat Override > Vacation > Presence Away > Schedule Block > Comfort / Eco  (+ Mold Delta)
+Room Manual Override > Central Thermostat Override > Vacation > Presence Away > Room schedule block with temperatures > House Override > House schedule block > House Target > (Independent rooms, or house disabled) the room's comfort/eco band
 ```
 
+The top of the ladder is the same for every room. Below it, a room with its own settings — its own schedule block or a manual override — outranks the house, and the house outranks a following room's own comfort/eco band. An empty room follows the house eco pair instead of the house comfort pair, and an empty room with no setting of its own stays on its **Guardrail Band**.
+
 "Eco when the room is empty" lowers the result to eco while the room is empty; override, vacation and presence away still take priority. The electricity price can move the **cooling** target by up to 2 °C (heating too if you opt in), never an override, vacation or absence.
+
+### House Target and House Schedule
+
+The **House Target** is one comfort pair (heat/cool) and one eco pair for the whole home. Every room follows it unless you give the room something of its own: a room schedule block with temperatures, or a manual override, outranks the house for that room. An empty room follows the house eco pair.
+
+The **House Schedule** is optional and built from Home Assistant `schedule.*` helper(s) with a selector entity, so the house target can move through the day like a room schedule does. A target or preset set on the house climate entity is a temporary hold: it lasts until the next house schedule change, and "Resume schedule" clears it.
+
+If the office is the only occupied room and the house target is 72 °F, the office is heated to 72 °F; the empty rooms follow the house eco pair. If someone sets the bedroom to 68 °F at night — its own schedule block, or an override — the bedroom gets 68 °F and the rest of the house stays on the house target. A room set to Independent keeps its own comfort, eco, schedule and gaps, exactly as before the house layer existed.
 
 ### Setpoint Nudge and Fallback Band
 
@@ -194,6 +209,7 @@ Shades are decided for the whole home, not per device: RoomMind lowers covers be
 | `sensor.roommind_central_action` | What the plant is doing: `idle`, `heating`, `cooling` or `circulating`, with the driving rooms, decision reason and active guards as attributes |
 | `sensor.roommind_house_temperature` | The House Reference Temperature the plan works against |
 | `binary_sensor.roommind_wet_coil_lockout` | On while Wet-Coil Lockout holds Circulation after a cooling run |
+| `climate.roommind_house` | The house as one thermostat, see [House climate entity](#house-climate-entity) |
 | `switch.roommind_vacation` | Global vacation mode toggle |
 | `switch.roommind_climate_control` | Global climate control toggle, the same as `Settings → General`. Off stops RoomMind controlling the plant and leaves the thermostat as it is, e.g. for a summer/winter automation |
 | `switch.roommind_{area_id}_cover_auto` | Per-room automatic cover control toggle |
@@ -225,6 +241,27 @@ The entity is placed in the room's area once when it is created, so it shows up 
 Like every override, one set here also lifts the outdoor temperature limits for heating and cooling while it lasts.
 
 A wall display or a thermostat RoomMind does not control can be linked with an automation: its setpoint → `climate.set_temperature` on the room entity, and the room entity's target → the display, so the display always shows what applies.
+
+</details>
+
+### House climate entity
+
+`climate.roommind_house` shows and controls the house layer the way a thermostat card expects. Its modes and presets are the ones following rooms inherit, and writing to it for the first time enables the house layer on an install that was upgraded from an earlier version.
+
+<details>
+<summary>What each climate feature does in RoomMind</summary>
+
+| Climate feature | In RoomMind |
+|---|---|
+| Target temperature (range in Auto mode) | The house targets currently in force for following rooms. Changing it sets a House Override, a temporary hold that lasts until the next house schedule change |
+| Presets Comfort / Eco | House comfort or eco override, also until the next house schedule change |
+| Preset Manual | Shown while a custom temperature is held; picking it holds the targets in force until the next house schedule change |
+| Preset Schedule (`none`) | Ends the House Override and returns to the house schedule ("Resume schedule") |
+| HVAC mode `heat` / `cool` / `heat_cool` | House climate mode Heat only / Cool only / Auto that following rooms inherit |
+| HVAC mode `off` | Pauses all control (`climate_control_active`); the house layer stays configured and resumes when the mode is turned back on |
+| `hvac_action` | What the plant is doing for the house: `heating`, `cooling`, `circulating`, `idle` or `off` |
+
+Attributes: the house comfort and eco pairs, the house climate mode, the bound schedule helper (`schedule_entity`, `schedule_name`, `schedule_block`, `next_change`), what is setting the target right now (`source`), `override_until`, `following_rooms` and `house_reference_temperature`.
 
 </details>
 

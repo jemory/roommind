@@ -6,7 +6,7 @@
 import type { AnalyticsDataPoint } from "../types";
 import type { TranslationKey } from "./localize";
 
-export type TargetReason = "override" | "vacation" | "away" | "vacant" | "mold" | "price";
+export type TargetReason = "override" | "vacation" | "away" | "vacant" | "house" | "mold" | "price";
 
 export interface TargetReasonGroup {
   id: string;
@@ -43,6 +43,7 @@ export const REASON_LABELS: Record<TargetReason, TranslationKey> = {
   vacation: "analytics.reason.vacation",
   away: "analytics.reason.away",
   vacant: "analytics.reason.vacant",
+  house: "analytics.reason.house",
   mold: "analytics.reason.mold",
   price: "analytics.reason.price",
 };

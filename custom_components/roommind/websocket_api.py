@@ -30,6 +30,7 @@ from .const import (
     VENTILATION_DOMAINS,
     build_override_live,
     get_central_plant_settings,
+    get_house_settings,
     is_override_suppressed,
 )
 from .services.analytics_service import (
@@ -109,6 +110,7 @@ _ROOM_SAVE_FIELDS = (
     "voc_sensor",
     "voc_threshold",
     "ventilation_entity",
+    "follow_house",
 )
 
 # Same limits as the room climate entity; also turns away nan/inf
@@ -125,6 +127,7 @@ _USER_ROOM_FIELDS = frozenset(
         "eco_cool",
         "climate_mode",
         "climate_control_enabled",
+        "follow_house",
     }
 )
 
@@ -163,6 +166,7 @@ _SETTINGS_SAVE_FIELDS = (
     "room_order",
     "group_by_floor",
     "central_plant",
+    "house",
 )
 
 
@@ -258,6 +262,43 @@ _CENTRAL_PLANT_SCHEMA = {
 }
 
 
+# The whole-House settings block. Every key is optional so a panel can save one
+# field at a time; extra keys are rejected (vol.Schema default: PREVENT_EXTRA).
+_HOUSE_SCHEMA = vol.Schema(
+    {
+        vol.Optional("enabled"): bool,
+        vol.Optional("heat_c"): vol.Any(_TARGET_TEMP, None),
+        vol.Optional("cool_c"): vol.Any(_TARGET_TEMP, None),
+        vol.Optional("override_heat"): vol.Any(_TARGET_TEMP, None),
+        vol.Optional("override_cool"): vol.Any(_TARGET_TEMP, None),
+        vol.Optional("eco_heat_c"): _TARGET_TEMP,
+        vol.Optional("eco_cool_c"): _TARGET_TEMP,
+        vol.Optional("climate_mode"): vol.In(CLIMATE_MODES),
+        vol.Optional("schedules"): [{vol.Required("entity_id"): str}],
+        vol.Optional("schedule_selector_entity"): str,
+        vol.Optional("preheat_enabled"): bool,
+        vol.Optional("price_shift"): vol.All(vol.Coerce(float), vol.Range(min=0, max=MAX_PRICE_SHIFT_K)),
+        vol.Optional("override_until"): vol.Any(vol.Coerce(float), None),
+        vol.Optional("override_type"): vol.Any(vol.In(OVERRIDE_TYPES), None),
+    }
+)
+
+# Fields a non-admin may write through roommind/house/save: the band/override
+# targets only. Structure (schedules, mode, enabled, ...) stays admin-only.
+_USER_HOUSE_FIELDS = frozenset(
+    {
+        "heat_c",
+        "cool_c",
+        "eco_heat_c",
+        "eco_cool_c",
+        "override_heat",
+        "override_cool",
+        "override_until",
+        "override_type",
+    }
+)
+
+
 def _central_plant_live(coordinator: RoomMindCoordinator | None) -> dict:
     """Return the coordinator's live Central Plant state, or an empty dict."""
     if coordinator is None:
@@ -265,6 +306,36 @@ def _central_plant_live(coordinator: RoomMindCoordinator | None) -> dict:
     data = coordinator.data or {}
     plant = data.get("central_plant") if isinstance(data, dict) else None
     return plant if isinstance(plant, dict) else {}
+
+
+def _house_live(coordinator: RoomMindCoordinator | None, store: RoomMindStore) -> dict:
+    """Return the coordinator's live House block, falling back to the store.
+
+    The coordinator does not publish ``data["house"]`` yet; until it does (and
+    on the very first cycle before it has run) answer with the configured
+    settings so the panel can always render. Never raises for a None or
+    never-run coordinator.
+    """
+    if coordinator is not None:
+        data = coordinator.data or {}
+        house = data.get("house") if isinstance(data, dict) else None
+        if isinstance(house, dict):
+            return house
+    return get_house_settings(store.get_settings())
+
+
+def _validate_house_band(settings: dict, changes: dict) -> bool:
+    """True when the merged house comfort/eco bands stay ordered."""
+    resolved: dict = {**get_house_settings(settings), **changes}
+    heat, cool = resolved.get("heat_c"), resolved.get("cool_c")
+    if isinstance(heat, (int, float)) and isinstance(cool, (int, float)):
+        if float(cool) <= float(heat):
+            return False
+    eco_heat, eco_cool = resolved.get("eco_heat_c"), resolved.get("eco_cool_c")
+    if isinstance(eco_heat, (int, float)) and isinstance(eco_cool, (int, float)):
+        if float(eco_cool) < float(eco_heat):
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +470,7 @@ async def websocket_list_rooms(
                 for area_id, room in rooms_without_area(hass, stored).items()
             ],
             "central_plant": central_plant,
+            "house": _house_live(coordinator, store),
             # Countdowns in the browser compare against this, not against the device's own clock
             "server_time": time.time(),
             "outdoor_temp": coordinator.outdoor_temp_effective if coordinator else None,
@@ -499,6 +571,7 @@ async def websocket_list_rooms(
         vol.Optional("ventilation_entity"): vol.Any(
             "", vol.All(str, vol.Match(rf"^({'|'.join(VENTILATION_DOMAINS)})\.[a-z0-9_]+$"))
         ),
+        vol.Optional("follow_house"): bool,
     }
 )
 @websocket_api.async_response
@@ -760,6 +833,7 @@ async def websocket_get_settings(
     store = hass.data[DOMAIN]["store"]
     settings = store.get_settings()
     settings["central_plant"] = get_central_plant_settings(settings)
+    settings["house"] = get_house_settings(settings)
     connection.send_result(msg["id"], {"settings": settings})
 
 
@@ -818,6 +892,7 @@ async def websocket_get_settings(
         vol.Optional("room_order"): [str],
         vol.Optional("group_by_floor"): bool,
         vol.Optional("central_plant"): _CENTRAL_PLANT_SCHEMA,
+        vol.Optional("house"): _HOUSE_SCHEMA,
     }
 )
 @websocket_api.async_response
@@ -844,10 +919,19 @@ async def websocket_save_settings(
         )
         return
 
+    house_changes = changes.get("house")
+    if isinstance(house_changes, dict) and not _validate_house_band(store.get_settings(), house_changes):
+        connection.send_error(
+            msg["id"],
+            "invalid_house_band",
+            "cool_c must be greater than heat_c and eco_cool_c must be >= eco_heat_c",
+        )
+        return
+
     settings = await store.async_save_settings(changes)
     connection.send_result(msg["id"], {"settings": settings})
     coordinator = _get_coordinator(hass)
-    if coordinator and ("climate_control_active" in changes or "central_plant" in changes):
+    if coordinator and ("climate_control_active" in changes or "central_plant" in changes or "house" in changes):
         # Stop/resume control now (#291) and pick up a new Central Thermostat at once.
         await coordinator.async_request_refresh()
 
@@ -898,6 +982,83 @@ async def _async_clear_plant_override(hass: HomeAssistant) -> None:
     else:
         # Older coordinator: the settings are already saved, just pick them up now.
         await coordinator.async_request_refresh()
+
+
+# ---------------------------------------------------------------------------
+# Whole-House settings commands
+# ---------------------------------------------------------------------------
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "roommind/house/save",
+        **_HOUSE_SCHEMA.schema,
+    }
+)
+@websocket_api.async_response
+async def websocket_house_save(
+    hass: HomeAssistant,
+    connection: ActiveConnection,
+    msg: dict,
+) -> None:
+    """Save a partial change to the whole-House settings block."""
+    store: RoomMindStore = hass.data[DOMAIN]["store"]
+    # The schema's keys are voluptuous ``Marker`` objects whose string form is the
+    # field name; convert, or the persisted dict would carry Marker keys that the
+    # HA store cannot serialise.
+    changes: dict = {str(key): msg[key] for key in _HOUSE_SCHEMA.schema if key in msg}
+
+    # Non-admins may write targets/overrides only; structure stays admin-only.
+    user = connection.user
+    if user is None or not user.is_admin:
+        disallowed = set(changes) - _USER_HOUSE_FIELDS
+        if disallowed:
+            connection.send_error(msg["id"], websocket_api.ERR_UNAUTHORIZED, "Only administrators can change this")
+            return
+
+    if not _validate_house_band(store.get_settings(), changes):
+        connection.send_error(
+            msg["id"],
+            "invalid_house_band",
+            "cool_c must be greater than heat_c and eco_cool_c must be >= eco_heat_c",
+        )
+        return
+
+    # A first target write activates the layer unless enabled was sent explicitly.
+    if ("heat_c" in changes or "cool_c" in changes) and "enabled" not in changes:
+        changes["enabled"] = True
+
+    await store.async_save_settings({"house": changes})
+    house = get_house_settings(store.get_settings())
+    coordinator = _get_coordinator(hass)
+    if coordinator:
+        await coordinator.async_request_refresh()
+    connection.send_result(msg["id"], {"house": house})
+
+
+@websocket_api.websocket_command({vol.Required("type"): "roommind/house/clear_override"})
+@websocket_api.async_response
+async def websocket_house_clear_override(
+    hass: HomeAssistant,
+    connection: ActiveConnection,
+    msg: dict,
+) -> None:
+    """Clear the whole-House manual override; any authenticated user may do this."""
+    store: RoomMindStore = hass.data[DOMAIN]["store"]
+    await store.async_save_settings(
+        {
+            "house": {
+                "override_heat": None,
+                "override_cool": None,
+                "override_until": None,
+                "override_type": None,
+            }
+        }
+    )
+    coordinator = _get_coordinator(hass)
+    if coordinator:
+        await coordinator.async_request_refresh()
+    connection.send_result(msg["id"], {"cleared": True})
 
 
 # ---------------------------------------------------------------------------
@@ -1124,6 +1285,8 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_override_clear)
     websocket_api.async_register_command(hass, websocket_get_settings)
     websocket_api.async_register_command(hass, websocket_save_settings)
+    websocket_api.async_register_command(hass, websocket_house_save)
+    websocket_api.async_register_command(hass, websocket_house_clear_override)
     websocket_api.async_register_command(hass, websocket_get_analytics)
     websocket_api.async_register_command(hass, websocket_thermal_reset)
     websocket_api.async_register_command(hass, websocket_thermal_reset_all)

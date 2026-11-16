@@ -6,7 +6,7 @@
  */
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import type { HomeAssistant, RoomConfig } from "../../types";
+import type { HomeAssistant, HouseLive, RoomConfig } from "../../types";
 import { localize } from "../../utils/localize";
 import { isAdmin } from "../../utils/schedule-api";
 import { formatClock, haTimeZone, sameDayInZone } from "../../utils/analytics-time";
@@ -15,6 +15,7 @@ import { roomNameOf, usageText } from "../../utils/schedule-usage";
 import { tokens } from "../../styles/tokens";
 import "../shared/rs-list-card";
 import "../shared/rs-list-row";
+import "../shared/rs-badge";
 import "./rs-schedule-create";
 import "../shared/rs-segmented";
 
@@ -29,9 +30,23 @@ interface ScheduleItem {
 export class RsScheduleOverview extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
   @property({ attribute: false }) public rooms: Record<string, RoomConfig> = {};
+  /** Live house layer: its bound helper is managed in House settings and cannot be deleted here. */
+  @property({ attribute: false }) public house: HouseLive | null = null;
 
   @state() private _creating = false;
   @state() private _createKind: "climate" | "cover" = "climate";
+
+  /** Helpers bound to the house layer: the active schedule plus the configured ones. */
+  private _houseHelpers(): Set<string> {
+    const h = this.house;
+    if (!h) return new Set();
+    const ids = [
+      ...(h.schedules ?? []).map((s) => s.entity_id),
+      h.schedule_selector_entity,
+      h.schedule_entity,
+    ];
+    return new Set(ids.filter((id): id is string => !!id));
+  }
 
   private _items(): ScheduleItem[] {
     const lang = this.hass.language;
@@ -81,6 +96,7 @@ export class RsScheduleOverview extends LitElement {
 
   private _renderRow(item: ScheduleItem, cover: boolean) {
     const l = this.hass.language;
+    const bound = this._houseHelpers().has(item.entityId);
     const used = usageText(
       this.rooms,
       item.entityId,
@@ -89,21 +105,39 @@ export class RsScheduleOverview extends LitElement {
       l,
     );
     const on = this.hass.states[item.entityId]?.state === "on";
+    // A house-bound helper is edited from House settings: this overview must not open the
+    // delete-capable schedule editor for it, so it is shown as a read-only warning row.
+    const secondary = bound
+      ? localize("house.inherited_hint", l)
+      : [used || localize("schedules.unused", l), this._stateText(item.entityId)]
+          .filter(Boolean)
+          .join(" · ");
     return html`<rs-list-row
-      clickable
-      chevron
+      ?clickable=${!bound}
+      ?chevron=${!bound}
       wrap
-      icon=${cover ? "mdi:blinds" : "mdi:calendar-clock"}
+      icon=${bound ? "mdi:home-lock" : cover ? "mdi:blinds" : "mdi:calendar-clock"}
       icon-label=${localize("detail.more_info", l)}
-      .iconColor=${on ? "var(--primary-color)" : ""}
+      .variant=${bound ? "warn" : "default"}
+      .iconColor=${!bound && on ? "var(--primary-color)" : ""}
       .heading=${item.name}
-      .secondary=${[used || localize("schedules.unused", l), this._stateText(item.entityId)]
-        .filter(Boolean)
-        .join(" · ")}
-      @row-click=${() =>
-        this._open(item.entityId, cover ? "cover" : item.rooms.length ? "climate" : "")}
+      .secondary=${secondary}
+      @row-click=${() => {
+        if (bound) return;
+        this._open(item.entityId, cover ? "cover" : item.rooms.length ? "climate" : "");
+      }}
       @icon-click=${() => this._moreInfo(item.entityId)}
-    ></rs-list-row>`;
+    >
+      ${
+        bound
+          ? html`<rs-badge
+              slot="end"
+              .label=${localize("house.schedule_badge", l)}
+              .hint=${localize("house.inherited_hint", l)}
+            ></rs-badge>`
+          : nothing
+      }
+    </rs-list-row>`;
   }
 
   /** "On until 22:00", "Off until Mon 06:00"; just on/off without a next change. */

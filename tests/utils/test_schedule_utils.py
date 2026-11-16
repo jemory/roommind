@@ -15,19 +15,28 @@ from homeassistant.util import dt as dt_util
 from custom_components.roommind.const import SCHEDULE_UNREADABLE_HOLD_HOURS, TargetTemps
 from custom_components.roommind.utils.price_utils import LEVEL_CHEAP, PriceSignal
 from custom_components.roommind.utils.schedule_utils import (
+    HouseContext,
+    TargetSource,
     band_in_force,
     find_active_block,
     get_active_schedule_entity,
+    house_override_active_at,
+    house_override_hold_until,
+    house_target_source,
     is_plant_override_at,
+    make_house_target_resolver,
     make_target_resolver,
     mask_override_band,
     override_hold_until,
     override_preset_band,
     price_shifted,
     read_schedule_blocks,
+    resolve_house_targets_at_time,
     resolve_schedule_index,
     resolve_target_at_time,
     resolve_targets_at_time,
+    resolve_targets_with_source,
+    schedule_block_sets_target,
     schedule_sets_target,
     set_band_sides,
 )
@@ -2249,3 +2258,330 @@ def test_make_target_resolver_never_priceshifts_a_whole_home_plant_override():
         price_signal=PriceSignal(current_level=LEVEL_CHEAP, now=time.time()),
     )
     assert resolver(time.time()) == TargetTemps(heat=22.0, cool=24.0)
+
+
+# ---------------------------------------------------------------------------
+# House layer (rungs 5-7 of the target ladder)
+# ---------------------------------------------------------------------------
+
+
+def _house(**overrides):
+    """A resolved house settings dict with an active pair and a comfort schedule."""
+    house = {
+        "enabled": True,
+        "heat_c": 21.0,
+        "cool_c": 24.0,
+        "eco_heat_c": 16.0,
+        "eco_cool_c": 28.0,
+        "price_shift": 0.0,
+        "schedules": [{"entity_id": "schedule.house"}],
+        "schedule_selector_entity": "",
+    }
+    house.update(overrides)
+    return house
+
+
+def _house_ctx(house=None, blocks=None, *, active=True):
+    """Build the HouseContext the coordinator hands to the room resolver."""
+    house = house or _house()
+    return HouseContext(
+        active=active,
+        heat_c=house.get("heat_c"),
+        cool_c=house.get("cool_c"),
+        eco_heat_c=house.get("eco_heat_c"),
+        eco_cool_c=house.get("eco_cool_c"),
+        target_at=make_house_target_resolver(blocks, house),
+        price_shift=float(house.get("price_shift") or 0.0),
+        hold_active_at=lambda ts: house_override_active_at(ts, house),
+    )
+
+
+class TestResolveHouseTargetsAtTime:
+    """The house resolves its own band: override > block > comfort pair, never eco/off."""
+
+    def test_pair_when_no_schedule(self):
+        assert resolve_house_targets_at_time(_monday_ts(), None, _house()) == TargetTemps(21.0, 24.0)
+
+    def test_block_heat_and_cool_win(self):
+        blocks = _monday_blocks({"heat_temperature": 20.0, "cool_temperature": 25.0})
+        assert resolve_house_targets_at_time(_monday_ts(), blocks, _house()) == TargetTemps(20.0, 25.0)
+
+    def test_single_temperature_block_sets_both_sides(self):
+        blocks = _monday_blocks({"temperature": 22.0})
+        assert resolve_house_targets_at_time(_monday_ts(), blocks, _house()) == TargetTemps(22.0, 22.0)
+
+    def test_block_with_one_side_keeps_house_pair_for_other(self):
+        blocks = _monday_blocks({"heat_temperature": 20.0})
+        assert resolve_house_targets_at_time(_monday_ts(), blocks, _house()) == TargetTemps(20.0, 24.0)
+
+    def test_house_override_beats_block(self):
+        house = _house(override_heat=23.0, override_cool=26.0, override_until=_monday_ts() + 3600)
+        blocks = _monday_blocks({"temperature": 22.0})
+        assert resolve_house_targets_at_time(_monday_ts(), blocks, house) == TargetTemps(23.0, 26.0)
+
+    def test_one_sided_override_takes_missing_side_from_block_without_crossing(self):
+        house = _house(override_heat=23.0, override_cool=None, override_until=_monday_ts() + 3600)
+        blocks = _monday_blocks({"temperature": 22.0})
+        assert resolve_house_targets_at_time(_monday_ts(), blocks, house) == TargetTemps(23.0, 23.0)
+
+    def test_expired_override_is_ignored(self):
+        house = _house(override_heat=23.0, override_cool=26.0, override_until=_monday_ts() - 100)
+        blocks = _monday_blocks({"temperature": 22.0})
+        assert resolve_house_targets_at_time(_monday_ts(), blocks, house) == TargetTemps(22.0, 22.0)
+
+    def test_block_without_temps_falls_back_to_pair(self):
+        assert resolve_house_targets_at_time(_monday_ts(), _monday_blocks({}), _house()) == TargetTemps(21.0, 24.0)
+
+    def test_out_of_range_side_falls_back_to_pair(self):
+        blocks = _monday_blocks({"heat_temperature": 110, "cool_temperature": 25.0})
+        assert resolve_house_targets_at_time(_monday_ts(), blocks, _house()) == TargetTemps(21.0, 25.0)
+
+    def test_schedule_gap_returns_pair_not_eco(self):
+        # Monday 06:00 is outside the 08:00-12:00 block, and a gap never means off.
+        gap = datetime(2025, 1, 6, 6, 0, 0, tzinfo=dt_util.DEFAULT_TIME_ZONE).timestamp()
+        assert resolve_house_targets_at_time(gap, _monday_blocks({}), _house()) == TargetTemps(21.0, 24.0)
+
+    def test_target_source_override_schedule_target(self):
+        ts = _monday_ts()
+        assert house_target_source(ts, _monday_blocks({"temperature": 22.0}), _house()) == "schedule"
+        assert house_target_source(ts, None, _house()) == "target"
+        house = _house(override_heat=23.0, override_until=ts + 3600)
+        assert house_target_source(ts, _monday_blocks({"temperature": 22.0}), house) == "override"
+
+    def test_make_house_resolver_binds_the_converter(self):
+        resolver = make_house_target_resolver(_monday_blocks({"temperature": 22.0}), _house())
+        assert resolver(_monday_ts()) == TargetTemps(22.0, 22.0)
+
+
+class TestTargetLadderWithHouse:
+    """Room override/plant/vacation/schedule outrank the house; a gap falls to it."""
+
+    def _resolve(self, ts, blocks, *, house=None, follow=True, **kwargs):
+        args = {
+            "override_until": None,
+            "override_heat": None,
+            "override_cool": None,
+            "vacation_until": None,
+            "vacation_temp": None,
+            "comfort_heat": 21.0,
+            "comfort_cool": 24.0,
+            "eco_heat": 17.0,
+            "eco_cool": 27.0,
+        }
+        args.update(kwargs)
+        return resolve_targets_with_source(ts, blocks, house=house, follow_house=follow, **args)
+
+    def test_room_block_beats_house(self):
+        targets, source = self._resolve(_monday_ts(), _monday_blocks({"temperature": 22.0}), house=_house_ctx())
+        assert (targets, source) == (TargetTemps(22.0, 22.0), TargetSource.ROOM_SCHEDULE)
+
+    def test_room_schedule_gap_falls_to_house_for_following_room(self):
+        gap = datetime(2025, 1, 6, 6, 0, 0, tzinfo=dt_util.DEFAULT_TIME_ZONE).timestamp()
+        targets, source = self._resolve(gap, _monday_blocks({}), house=_house_ctx())
+        assert (targets, source) == (TargetTemps(21.0, 24.0), TargetSource.HOUSE)
+
+    def test_independent_room_gap_stays_eco(self):
+        gap = datetime(2025, 1, 6, 6, 0, 0, tzinfo=dt_util.DEFAULT_TIME_ZONE).timestamp()
+        targets, source = self._resolve(gap, _monday_blocks({}), house=_house_ctx(), follow=False)
+        assert (targets, source) == (TargetTemps(17.0, 27.0), TargetSource.ROOM_BASE)
+
+    def test_independent_room_gap_can_stay_off(self):
+        gap = datetime(2025, 1, 6, 6, 0, 0, tzinfo=dt_util.DEFAULT_TIME_ZONE).timestamp()
+        targets, source = self._resolve(
+            gap, _monday_blocks({}), house=_house_ctx(), follow=False, schedule_off_action="off"
+        )
+        assert (targets, source) == (TargetTemps(None, None), TargetSource.ROOM_BASE)
+
+    def test_inactive_house_reproduces_old_behaviour(self):
+        ts = _monday_ts()
+        targets, source = self._resolve(ts, None, house=_house_ctx(active=False))
+        assert (targets, source) == (TargetTemps(21.0, 24.0), TargetSource.ROOM_BASE)
+
+    def test_room_manual_override_beats_house(self):
+        targets, source = self._resolve(
+            _monday_ts(),
+            None,
+            house=_house_ctx(),
+            override_heat=25.0,
+            override_cool=25.0,
+            override_until=_monday_ts() + 3600,
+        )
+        assert (targets, source) == (TargetTemps(25.0, 25.0), TargetSource.OVERRIDE)
+
+    def test_vacation_beats_house(self):
+        ts = _monday_ts()
+        targets, source = self._resolve(ts, None, house=_house_ctx(), vacation_until=ts + 3600, vacation_temp=16.0)
+        assert (targets, source) == (TargetTemps(16.0, 27.0), TargetSource.VACATION)
+
+    def test_plant_override_beats_house(self):
+        ts = _monday_ts()
+        targets, source = self._resolve(
+            ts,
+            None,
+            house=_house_ctx(),
+            plant_override_until=ts + 3600,
+            plant_override_heat=23.0,
+            plant_override_cool=26.0,
+        )
+        assert (targets, source) == (TargetTemps(23.0, 26.0), TargetSource.PLANT_OVERRIDE)
+
+    def test_vacant_following_room_caps_to_house_eco(self):
+        gap = datetime(2025, 1, 6, 6, 0, 0, tzinfo=dt_util.DEFAULT_TIME_ZONE).timestamp()
+        targets, source = self._resolve(gap, _monday_blocks({}), house=_house_ctx(), room_vacant=True)
+        assert (targets, source) == (TargetTemps(16.0, 28.0), TargetSource.HOUSE)
+
+    def test_occupied_following_room_gets_house_pair(self):
+        gap = datetime(2025, 1, 6, 6, 0, 0, tzinfo=dt_util.DEFAULT_TIME_ZONE).timestamp()
+        targets, _ = self._resolve(gap, _monday_blocks({}), house=_house_ctx())
+        assert targets == TargetTemps(21.0, 24.0)
+
+    def test_independent_vacant_room_caps_to_its_own_eco(self):
+        targets, source = self._resolve(_monday_ts(), None, house=_house_ctx(), follow=False, room_vacant=True)
+        assert (targets, source) == (TargetTemps(17.0, 27.0), TargetSource.ROOM_BASE)
+
+    def test_compatibility_wrapper_returns_targets_only(self):
+        gap = datetime(2025, 1, 6, 6, 0, 0, tzinfo=dt_util.DEFAULT_TIME_ZONE).timestamp()
+        result = resolve_targets_at_time(
+            ts=gap,
+            schedule_blocks=_monday_blocks({}),
+            override_until=None,
+            override_heat=None,
+            override_cool=None,
+            vacation_until=None,
+            vacation_temp=None,
+            comfort_heat=21.0,
+            comfort_cool=24.0,
+            eco_heat=17.0,
+            eco_cool=27.0,
+            house=_house_ctx(),
+            follow_house=True,
+        )
+        assert result == TargetTemps(21.0, 24.0)
+
+
+class TestScheduleBlockSetsTarget:
+    """Only a block carrying a sanitized temperature claims the schedule rung."""
+
+    def test_block_with_temps_is_true(self):
+        assert schedule_block_sets_target(_monday_ts(), _monday_blocks({"temperature": 22.0})) is True
+        assert schedule_block_sets_target(_monday_ts(), _monday_blocks({"heat_temperature": 22.0})) is True
+
+    def test_block_without_temps_is_false(self):
+        assert schedule_block_sets_target(_monday_ts(), _monday_blocks({})) is False
+
+    def test_no_block_is_false(self):
+        assert schedule_block_sets_target(_monday_ts(), None) is False
+        assert schedule_block_sets_target(_monday_ts(), {}) is False
+
+    def test_out_of_range_only_is_false(self):
+        assert schedule_block_sets_target(_monday_ts(), _monday_blocks({"temperature": 110})) is False
+
+
+class TestHouseOverrideHoldUntil:
+    """House holds follow the same schedule boundary rules as room overrides."""
+
+    def test_hold_ends_at_next_schedule_change(self):
+        nxt = datetime.fromtimestamp(time.time() + 1800, UTC)
+        assert house_override_hold_until(_hold_hass("on", nxt), _house()) == nxt.timestamp()
+
+    def test_no_schedule_returns_none(self):
+        assert house_override_hold_until(_hold_hass(None), {"schedules": []}) is None
+
+    def test_unreadable_schedule_uses_the_fallback(self):
+        now = time.time()
+        until = house_override_hold_until(_hold_hass("unavailable"), _house(), now=now)
+        assert until == now + SCHEDULE_UNREADABLE_HOLD_HOURS * 3600
+
+    def test_past_next_event_uses_the_fallback(self):
+        now = time.time()
+        stale = datetime.fromtimestamp(now - 60, UTC)
+        until = house_override_hold_until(_hold_hass("on", stale), _house(), now=now)
+        assert until == now + SCHEDULE_UNREADABLE_HOLD_HOURS * 3600
+
+    def test_override_active_at_expiry(self):
+        now = time.time()
+        house = _house(override_heat=22.0, override_until=now + 60)
+        assert house_override_active_at(now, house) is True
+        assert house_override_active_at(now + 120, house) is False
+        assert house_override_active_at(now, _house(override_heat=22.0, override_until=None)) is True
+
+
+class TestHousePriceShift:
+    """Effective shift comes from the house; a house hold is never price-shifted."""
+
+    def _signal(self, now: float) -> PriceSignal:
+        return PriceSignal(current_level=LEVEL_CHEAP, now=now)
+
+    def test_shift_override_replaces_the_room_value(self):
+        now = time.time()
+        shifted, deltas = price_shifted(
+            TargetTemps(21.0, 24.0),
+            now,
+            {"price_shift": 0.0},
+            {},
+            self._signal(now),
+            presence_away=False,
+            room_vacant=False,
+            shift_override=1.0,
+        )
+        assert shifted == TargetTemps(21.0, 23.0)
+        assert deltas == (0.0, -1.0)
+
+    def test_zero_shift_override_disables_the_room_value(self):
+        now = time.time()
+        shifted, deltas = price_shifted(
+            TargetTemps(21.0, 24.0),
+            now,
+            {"price_shift": 2.0},
+            {},
+            self._signal(now),
+            presence_away=False,
+            room_vacant=False,
+            shift_override=0.0,
+        )
+        assert shifted == TargetTemps(21.0, 24.0)
+        assert deltas == (0.0, 0.0)
+
+    def test_schedule_sets_target_respects_house_hold(self):
+        now = time.time()
+        assert (
+            schedule_sets_target(now, {}, {}, presence_away=False, room_vacant=False, house_override_active=True)
+            is False
+        )
+        assert (
+            schedule_sets_target(now, {}, {}, presence_away=False, room_vacant=False, house_override_active=False)
+            is True
+        )
+
+    def test_house_hold_suppresses_the_price_shift_per_timestamp(self):
+        now = time.time()
+        room = {"comfort_heat": 21.0, "comfort_cool": 24.0, "price_shift": 1.0}
+        house = _house(price_shift=1.0, override_heat=22.0, override_until=now + 60)
+        ctx = _house_ctx(house)
+        resolver = make_target_resolver(
+            None,
+            room,
+            {},
+            house=ctx,
+            follow_house=True,
+            price_signal=self._signal(now),
+        )
+        # Inside the hold: the house's overridden pair is untouched by the price.
+        assert resolver(now) == TargetTemps(22.0, 24.0)
+        # After the hold expires, the price shift applies to the house's pair
+        # using the house's own price_shift setting.
+        assert resolver(now + 120) == TargetTemps(21.0, 23.0)
+
+    def test_following_room_uses_house_shift_even_without_room_shift(self):
+        now = time.time()
+        room = {"comfort_heat": 21.0, "comfort_cool": 24.0}
+        house = _house(price_shift=1.0)
+        resolver = make_target_resolver(
+            None,
+            room,
+            {},
+            house=_house_ctx(house),
+            follow_house=True,
+            price_signal=self._signal(now),
+        )
+        assert resolver(now) == TargetTemps(21.0, 23.0)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from custom_components.roommind.const import (
@@ -300,3 +302,34 @@ async def test_created_defaults_match_the_constants(store):
 
     assert a["comfort_cool"] == b["comfort_cool"] == DEFAULT_COMFORT_COOL
     assert a["eco_cool"] == b["eco_cool"] == DEFAULT_ECO_COOL
+
+
+async def test_a_new_room_follows_the_house_settings_by_default(store):
+    await store.async_load()
+
+    room = await store.async_save_room("living_room", {})
+
+    assert room["follow_house"] is True
+
+
+async def test_an_explicit_follow_house_false_is_stored(store):
+    await store.async_load()
+
+    room = await store.async_save_room("living_room", {"follow_house": False})
+
+    assert room["follow_house"] is False
+
+
+async def test_an_old_room_without_the_flag_reads_back_as_following(store):
+    store._store.async_load = AsyncMock(
+        return_value={
+            "rooms": {"living_room": {"area_id": "living_room"}},
+            "settings": {},
+            "thermal_data": {},
+            "occupancy_trends": {},
+        }
+    )
+
+    await store.async_load()
+
+    assert store.get_room("living_room")["follow_house"] is True

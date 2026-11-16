@@ -256,6 +256,7 @@ def test_extra_attributes(setup):
     )
     assert entity.extra_state_attributes == {
         "override_until": NEXT_EVENT.isoformat(),
+        "follow_house": True,
         "window_open": True,
         "presence_away": True,
         "occupancy_vacant": False,

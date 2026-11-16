@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from custom_components.roommind.const import DOMAIN, get_central_plant_settings
+from custom_components.roommind.const import (
+    DOMAIN,
+    get_central_plant_settings,
+    get_house_settings,
+)
 from custom_components.roommind.websocket_api import (
     _csv_to_points,
     _safe_float,
@@ -18,6 +22,8 @@ from custom_components.roommind.websocket_api import (
     websocket_get_analytics,
     websocket_get_diagnostics,
     websocket_get_settings,
+    websocket_house_clear_override,
+    websocket_house_save,
     websocket_list_rooms,
     websocket_override_clear,
     websocket_override_set,
@@ -39,6 +45,8 @@ _override_set = websocket_override_set.__wrapped__
 _override_clear = websocket_override_clear.__wrapped__
 _get_settings = websocket_get_settings.__wrapped__
 _save_settings = websocket_save_settings.__wrapped__.__wrapped__
+_house_save = websocket_house_save.__wrapped__
+_house_clear_override = websocket_house_clear_override.__wrapped__
 _thermal_reset = websocket_thermal_reset.__wrapped__.__wrapped__
 _thermal_reset_all = websocket_thermal_reset_all.__wrapped__.__wrapped__
 _get_analytics = websocket_get_analytics.__wrapped__
@@ -96,6 +104,7 @@ async def test_list_rooms_empty(ws_hass, store, connection):
             "schedule_off_action": "eco",
             "anyone_home": True,
             "central_plant": get_central_plant_settings({}),
+            "house": get_house_settings({"house": {"enabled": True, "heat_c": 21.0, "cool_c": 24.0}}),
         },
     )
 
@@ -1051,7 +1060,15 @@ async def test_get_settings_empty(ws_hass, store, connection):
     msg = {"id": 10, "type": "roommind/settings/get"}
     await _get_settings(ws_hass, connection, msg)
 
-    connection.send_result.assert_called_once_with(10, {"settings": {"central_plant": get_central_plant_settings({})}})
+    connection.send_result.assert_called_once_with(
+        10,
+        {
+            "settings": {
+                "house": get_house_settings({"house": {"enabled": True, "heat_c": 21.0, "cool_c": 24.0}}),
+                "central_plant": get_central_plant_settings({}),
+            }
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -1839,14 +1856,17 @@ async def test_analytics_model_has_occupancy_sensors_false(ws_hass, store, conne
 
 
 def test_register_websocket_commands(hass):
-    """async_register_websocket_commands registers all 14 commands."""
+    """async_register_websocket_commands registers all 16 commands."""
     from unittest.mock import patch
 
     from custom_components.roommind.websocket_api import async_register_websocket_commands
 
     with patch("custom_components.roommind.websocket_api.websocket_api.async_register_command") as mock_reg:
         async_register_websocket_commands(hass)
-        assert mock_reg.call_count == 14
+        assert mock_reg.call_count == 16
+        registered = {call.args[1].__name__ for call in mock_reg.call_args_list}
+        assert "websocket_house_save" in registered
+        assert "websocket_house_clear_override" in registered
 
 
 # ---------------------------------------------------------------------------
@@ -3335,3 +3355,307 @@ async def test_plant_clear_override_without_a_coordinator(ws_hass, store, connec
 
     assert store.get_settings()["plant_override_cool"] is None
     connection.send_result.assert_called_once_with(32, {"cleared": True})
+
+
+# ---------------------------------------------------------------------------
+# Whole-House settings block (WebSocket)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_settings_exposes_the_resolved_house_block(ws_hass, store, connection):
+    """settings/get composes the house block alongside the central plant."""
+    await store.async_load()
+    await store.async_save_settings({"house": {"heat_c": 22.0, "cool_c": 25.0}})
+
+    await _get_settings(ws_hass, connection, {"id": 40, "type": "roommind/settings/get"})
+
+    settings = connection.send_result.call_args[0][1]["settings"]
+    assert settings["house"]["heat_c"] == 22.0
+    assert settings["house"]["cool_c"] == 25.0
+    # Unspecified keys are still defaulted, not dropped by the partial save.
+    assert settings["house"]["eco_heat_c"] == 17.0
+    assert settings["house"]["climate_mode"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_save_settings_merges_a_partial_house_change(ws_hass, store, connection):
+    """A partial house save keeps the other house keys."""
+    await store.async_load()
+    await store.async_save_settings({"house": {"heat_c": 20.0, "cool_c": 26.0, "climate_mode": "heat_only"}})
+
+    await _save_settings(
+        ws_hass, connection, {"id": 41, "type": "roommind/settings/save", "house": {"preheat_enabled": False}}
+    )
+
+    house = store.get_settings()["house"]
+    assert house["preheat_enabled"] is False
+    assert house["heat_c"] == 20.0
+    assert house["cool_c"] == 26.0
+    assert house["climate_mode"] == "heat_only"
+
+
+@pytest.mark.asyncio
+async def test_save_settings_refreshes_when_house_changes(ws_hass, store, connection):
+    coordinator = MagicMock()
+    coordinator.async_request_refresh = AsyncMock()
+    ws_hass.data[DOMAIN]["coordinator"] = coordinator
+    await store.async_load()
+
+    await _save_settings(ws_hass, connection, {"id": 42, "type": "roommind/settings/save", "house": {"enabled": True}})
+
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"heat_c": 24.0, "cool_c": 22.0},  # inverted comfort band
+        {"eco_heat_c": 20.0, "eco_cool_c": 18.0},  # inverted eco band
+    ],
+)
+@pytest.mark.asyncio
+async def test_save_settings_rejects_an_invalid_house_band(ws_hass, store, connection, changes):
+    await store.async_load()
+    before = store.get_settings()["house"]
+
+    await _save_settings(ws_hass, connection, {"id": 43, "type": "roommind/settings/save", "house": changes})
+
+    assert connection.send_error.call_args.args[1] == "invalid_house_band"
+    assert store.get_settings()["house"] == before
+    connection.send_result.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_non_admin_settings_save_still_rejected(ws_hass, store, user_connection):
+    """roommind/settings/save stays admin-only even for a house change."""
+    from homeassistant.exceptions import Unauthorized
+
+    await store.async_load()
+
+    with pytest.raises(Unauthorized):
+        websocket_save_settings(
+            ws_hass,
+            user_connection,
+            {"id": 44, "type": "roommind/settings/save", "house": {"enabled": True}},
+        )
+
+
+@pytest.mark.asyncio
+async def test_house_save_admin_writes_everything(ws_hass, store, connection):
+    """An admin may write any house field, and the resolved block is echoed."""
+    await store.async_load()
+    coordinator = MagicMock()
+    coordinator.async_request_refresh = AsyncMock()
+    ws_hass.data[DOMAIN]["coordinator"] = coordinator
+
+    await _house_save(
+        ws_hass,
+        connection,
+        {
+            "id": 50,
+            "type": "roommind/house/save",
+            "enabled": True,
+            "heat_c": 20.0,
+            "cool_c": 26.0,
+            "climate_mode": "heat_only",
+            "schedules": [{"entity_id": "schedule.house"}],
+            "preheat_enabled": False,
+        },
+    )
+
+    connection.send_error.assert_not_called()
+    coordinator.async_request_refresh.assert_awaited_once()
+    house = connection.send_result.call_args[0][1]["house"]
+    assert house["enabled"] is True
+    assert house["heat_c"] == 20.0
+    assert house["cool_c"] == 26.0
+    assert house["climate_mode"] == "heat_only"
+    assert house["schedules"] == [{"entity_id": "schedule.house"}]
+    assert house["preheat_enabled"] is False
+    assert house["eco_heat_c"] == 17.0  # defaulted
+
+
+@pytest.mark.asyncio
+async def test_house_save_non_admin_targets_allowed(ws_hass, store, user_connection):
+    user_connection.user.is_admin = False
+    await store.async_load()
+
+    await _house_save(
+        ws_hass, user_connection, {"id": 51, "type": "roommind/house/save", "heat_c": 21.0, "cool_c": 25.0}
+    )
+
+    user_connection.send_error.assert_not_called()
+    house = user_connection.send_result.call_args[0][1]["house"]
+    assert house["heat_c"] == 21.0
+    assert house["cool_c"] == 25.0
+
+
+@pytest.mark.parametrize("field", ["climate_mode", "schedules", "enabled"])
+@pytest.mark.asyncio
+async def test_house_save_non_admin_structure_rejected(ws_hass, store, user_connection, field):
+    await store.async_load()
+    before = store.get_settings()["house"]
+    values = {"climate_mode": "heat_only", "schedules": [{"entity_id": "schedule.house"}], "enabled": False}
+
+    await _house_save(ws_hass, user_connection, {"id": 52, "type": "roommind/house/save", field: values[field]})
+
+    assert user_connection.send_error.call_args.args[1] == "unauthorized"
+    assert store.get_settings()["house"] == before
+    user_connection.send_result.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_house_save_target_alone_enables_the_layer(ws_hass, store, connection):
+    await store.async_load()
+    await store.async_save_settings({"house": {"enabled": False}})
+
+    await _house_save(ws_hass, connection, {"id": 53, "type": "roommind/house/save", "heat_c": 20.0})
+
+    house = store.get_settings()["house"]
+    assert house["enabled"] is True
+    assert house["heat_c"] == 20.0
+
+
+@pytest.mark.asyncio
+async def test_house_save_rejects_an_invalid_band_and_writes_nothing(ws_hass, store, connection):
+    await store.async_load()
+    before = store.get_settings()["house"]
+
+    await _house_save(ws_hass, connection, {"id": 54, "type": "roommind/house/save", "heat_c": 25.0, "cool_c": 20.0})
+
+    assert connection.send_error.call_args.args[1] == "invalid_house_band"
+    assert store.get_settings()["house"] == before
+    connection.send_result.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_house_clear_override_clears_four_keys_and_leaves_the_rest(ws_hass, store, connection):
+    """house/clear_override keeps the band and schedules intact; any user may call it."""
+    await store.async_load()
+    await store.async_save_settings(
+        {
+            "house": {
+                "heat_c": 20.0,
+                "cool_c": 26.0,
+                "override_heat": 24.0,
+                "override_cool": 28.0,
+                "override_until": 1234.0,
+                "override_type": "boost",
+            }
+        }
+    )
+    coordinator = MagicMock()
+    coordinator.async_request_refresh = AsyncMock()
+    ws_hass.data[DOMAIN]["coordinator"] = coordinator
+
+    await _house_clear_override(ws_hass, connection, {"id": 55, "type": "roommind/house/clear_override"})
+
+    house = store.get_settings()["house"]
+    assert house["override_heat"] is None
+    assert house["override_cool"] is None
+    assert house["override_until"] is None
+    assert house["override_type"] is None
+    assert house["heat_c"] == 20.0
+    assert house["cool_c"] == 26.0
+    coordinator.async_request_refresh.assert_awaited_once()
+    connection.send_result.assert_called_once_with(55, {"cleared": True})
+
+
+@pytest.mark.asyncio
+async def test_house_clear_override_without_a_coordinator(ws_hass, store, connection):
+    await store.async_load()
+    await store.async_save_settings({"house": {"override_heat": 24.0}})
+
+    await _house_clear_override(ws_hass, connection, {"id": 56, "type": "roommind/house/clear_override"})
+
+    assert store.get_settings()["house"]["override_heat"] is None
+    connection.send_result.assert_called_once_with(56, {"cleared": True})
+
+
+@pytest.mark.asyncio
+async def test_list_rooms_includes_house_without_a_coordinator(ws_hass, store, connection):
+    """With no coordinator the house block comes from the store settings."""
+    await store.async_load()
+    await store.async_save_settings({"house": {"heat_c": 19.0, "cool_c": 27.0}})
+
+    await _list_rooms(ws_hass, connection, {"id": 60, "type": "roommind/rooms/list"})
+
+    payload = connection.send_result.call_args[0][1]
+    assert payload["house"]["heat_c"] == 19.0
+    assert payload["house"]["cool_c"] == 27.0
+    assert payload["house"]["eco_heat_c"] == 17.0
+    # Existing keys untouched.
+    assert "rooms" in payload
+    assert "central_plant" in payload
+    assert "server_time" in payload
+
+
+@pytest.mark.asyncio
+async def test_list_rooms_uses_the_live_house_block_from_the_coordinator(ws_hass, store, connection):
+    """A published coordinator house block wins over the stored one."""
+    await store.async_load()
+    coordinator = MagicMock()
+    coordinator.rooms = {}
+    coordinator.data = {"rooms": {}, "house": {"enabled": True, "heat_c": 15.0, "cool_c": 30.0}}
+    coordinator.async_request_refresh = AsyncMock()
+    ws_hass.data[DOMAIN]["coordinator"] = coordinator
+
+    await _list_rooms(ws_hass, connection, {"id": 61, "type": "roommind/rooms/list"})
+
+    house = connection.send_result.call_args[0][1]["house"]
+    assert house["heat_c"] == 15.0
+    assert house["cool_c"] == 30.0
+
+
+def test_house_live_handles_missing_and_non_dict_coordinator_data():
+    from custom_components.roommind.websocket_api import _house_live
+
+    store = MagicMock()
+    store.get_settings.return_value = {"house": {"heat_c": 18.0}}
+    assert _house_live(None, store)["heat_c"] == 18.0
+
+    coordinator = MagicMock()
+    coordinator.data = None
+    assert _house_live(coordinator, store)["heat_c"] == 18.0
+
+    coordinator.data = {"house": "not-a-dict"}
+    assert _house_live(coordinator, store)["heat_c"] == 18.0
+
+
+@pytest.mark.asyncio
+async def test_save_room_accepts_follow_house_existing(ws_hass, store, connection):
+    await store.async_load()
+    await store.async_save_room("living", {"follow_house": True})
+
+    await _save_room(
+        ws_hass, connection, {"id": 70, "type": "roommind/rooms/save", "area_id": "living", "follow_house": False}
+    )
+
+    connection.send_error.assert_not_called()
+    assert store.get_room("living")["follow_house"] is False
+
+
+@pytest.mark.asyncio
+async def test_save_room_accepts_follow_house_new(ws_hass, store, connection):
+    await store.async_load()
+
+    await _save_room(
+        ws_hass, connection, {"id": 71, "type": "roommind/rooms/save", "area_id": "new", "follow_house": False}
+    )
+
+    connection.send_error.assert_not_called()
+    assert store.get_room("new")["follow_house"] is False
+
+
+@pytest.mark.asyncio
+async def test_non_admin_may_toggle_follow_house(ws_hass, store, user_connection):
+    await store.async_load()
+    await store.async_save_room("living", {"follow_house": True})
+
+    await _save_room(
+        ws_hass, user_connection, {"id": 72, "type": "roommind/rooms/save", "area_id": "living", "follow_house": False}
+    )
+
+    user_connection.send_error.assert_not_called()
+    assert store.get_room("living")["follow_house"] is False

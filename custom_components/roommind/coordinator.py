@@ -54,6 +54,7 @@ from .const import (
     OUTDOOR_UNAVAILABLE_NOTIFY_CYCLES,
     OVERRIDE_TURN_ON_REFRESH_DELAY_S,
     TARGET_REASON_AWAY,
+    TARGET_REASON_HOUSE,
     TARGET_REASON_OVERRIDE,
     TARGET_REASON_PLANT_OVERRIDE,
     TARGET_REASON_VACANT,
@@ -63,6 +64,8 @@ from .const import (
     TargetTemps,
     build_override_live,
     get_central_plant_settings,
+    get_house_settings,
+    is_house_active,
     is_override_active,
     is_override_suppressed,
     is_plant_override_active,
@@ -101,16 +104,22 @@ from .utils.humidity_utils import effective_temperature_c
 from .utils.presence_utils import is_presence_away
 from .utils.price_utils import PriceSignal
 from .utils.schedule_utils import (
+    HouseContext,
+    TargetSource,
     cap_cool_only_heat,
     find_active_block,
     find_rejected_block_temps,
     get_active_schedule_entity,
-    is_plant_override_at,
+    house_override_active_at,
+    house_target_source,
+    make_house_target_resolver,
     make_target_resolver,
+    next_schedule_change,
     price_shifted,
     read_schedule_blocks,
     resolve_schedule_index,
-    resolve_targets_at_time,
+    resolve_targets_with_source,
+    schedule_block_sets_target,
 )
 from .utils.sensor_utils import read_sensor_value
 from .utils.temp_utils import celsius_delta_to_ha, ha_temp_to_celsius, ha_temp_unit_str
@@ -231,6 +240,7 @@ class _RoomCycle:
     force_off: bool = False
     presence_away: bool = False
     vacation_active: bool = False
+    house_following: bool = False
 
     @property
     def controllable(self) -> bool:
@@ -303,6 +313,8 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         self._override_seeded_at: dict[str, float] = {}
         # Per-entity cache of schedule blocks; fallback when schedule.get_schedule fails (#308)
         self._schedule_blocks_cache: dict[str, dict] = {}
+        # House-layer schedule blocks, cached per entity like the room schedules.
+        self._house_blocks_cache: dict[str, dict] = {}
         # Sides of the last run, so an auto room's cards keep showing the side it ran.
         self._recent_temps_side: dict[str, str] = {}
         # Track which rooms already have entity platform entities registered.
@@ -361,7 +373,9 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             now,
         )
 
-        # -- 5. Per-room input collection -------------------------------------
+        # -- 5. House layer, then per-room input collection -------------------
+        house, house_ctx, house_blocks = await self._async_house_state(settings)
+        house_active = house_ctx is not None
         cycles: list[_RoomCycle] = []
         for area_id, room in rooms.items():
             # Live, not this cycle's snapshot: an area or room deleted while the cycle awaited.
@@ -375,6 +389,8 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                 thermostat_entity,
                 thermostat_temp_c,
                 now,
+                house,
+                house_ctx,
             )
             cycles.append(cycle)
 
@@ -390,7 +406,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         wet_coil_locked = self._step_wet_coil(cycles, plant_settings, observed_action, now)
         any_override = self._any_override(cycles, settings)
         all_force_off = self._all_force_off(cycles, settings)
-        climate_mode = self._house_climate_mode(cycles)
+        climate_mode = self._house_climate_mode(cycles, house, house_active)
         startup_waiting = self._startup_waiting(cycles, thermostat_entity)
         exterior_gate = self._plant_manager.evaluate_exterior_gate(
             rooms,
@@ -423,6 +439,9 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             cloud_series,
             now,
             wet_coil_locked,
+            house,
+            house_ctx,
+            house_active,
         )
         commanded_action = plan.current_action()
         if not thermostat_entity or not settings.get("climate_control_active", True) or startup_waiting:
@@ -487,7 +506,116 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         )
         await self._async_persist(store, room_states)
         self.rooms = room_states
-        return {"rooms": room_states, "central_plant": self.central_plant}
+        house_live = self._house_live_dict(house, house_ctx, house_blocks, cycles, now)
+        return {"rooms": room_states, "central_plant": self.central_plant, "house": house_live}
+
+    # ------------------------------------------------------------------ #
+    # House layer
+    # ------------------------------------------------------------------ #
+
+    async def _async_house_state(self, settings: dict) -> tuple[dict, HouseContext | None, dict | None]:
+        """Resolve the house settings, its live context and its schedule blocks.
+
+        Called once per cycle after the settings are final. ``house_ctx`` is
+        None unless the house layer is active, and ``house_blocks`` is the same
+        schedule data the house target resolver uses (cached per entity).
+        """
+        house = get_house_settings(settings)
+        if not is_house_active({"house": house}):
+            return house, None, None
+        house_entity = get_active_schedule_entity(self.hass, house)
+        blocks = (
+            await read_schedule_blocks(self.hass, house_entity, cache=self._house_blocks_cache)
+            if house_entity
+            else None
+        )
+        hold_active_at = lambda ts: house_override_active_at(ts, house)  # noqa: E731
+        ctx = HouseContext(
+            active=True,
+            heat_c=house.get("heat_c"),
+            cool_c=house.get("cool_c"),
+            eco_heat_c=house.get("eco_heat_c"),
+            eco_cool_c=house.get("eco_cool_c"),
+            target_at=make_house_target_resolver(blocks, house, self.hass),
+            price_shift=float(house.get("price_shift") or 0.0),
+            hold_active_at=hold_active_at,
+        )
+        return house, ctx, blocks
+
+    @staticmethod
+    def _room_follows_house(room: dict, house: dict) -> bool:
+        """Whether a room follows the active house layer."""
+        del house  # the decision currently lives on the room; the house is passed for symmetry.
+        return bool(room.get("follow_house", True))
+
+    def _effective_climate_mode(self, room: dict, house: dict, house_active: bool) -> str:
+        """The climate mode that governs a room's targets and MPC massking.
+
+        A room following an active house uses the house mode, so a heat_only /
+        cool_only house masks the series the same way for every follower.
+        """
+        if house_active and self._room_follows_house(room, house):
+            return str(house.get("climate_mode", "auto"))
+        return str(room.get("climate_mode", "auto"))
+
+    @staticmethod
+    def _active_block_window(blocks: dict | None, ts: float) -> dict[str, Any] | None:
+        """The active schedule block's ``from``/``to`` window, for the live payload."""
+        if not blocks:
+            return None
+        from datetime import UTC, datetime
+
+        local = dt_util.as_local(datetime.fromtimestamp(ts, tz=UTC))
+        day_blocks = blocks.get(local.strftime("%A").lower(), []) or []
+        now_t = local.time()
+        for block in day_blocks:
+            from_raw = block.get("from", "00:00:00")
+            to_raw = block.get("to", "00:00:00")
+            from_t = from_raw if hasattr(from_raw, "hour") else datetime.strptime(str(from_raw), "%H:%M:%S").time()
+            to_t = to_raw if hasattr(to_raw, "hour") else datetime.strptime(str(to_raw), "%H:%M:%S").time()
+            if from_t <= now_t < to_t:
+                return {"from": block.get("from"), "to": block.get("to")}
+        return None
+
+    def _house_live_dict(
+        self,
+        house: dict,
+        house_ctx: HouseContext | None,
+        house_blocks: dict | None,
+        cycles: list[_RoomCycle],
+        now: float,
+    ) -> dict[str, Any]:
+        """The live house-layer payload read by the card, panel and entities.
+
+        Always present (also before the first plan). It carries every resolved
+        house setting plus the derived live fields the frontend consumes.
+        """
+        active = house_ctx is not None
+        converter = partial(ha_temp_to_celsius, self.hass)
+        band_targets = (
+            house_ctx.target_at(now)
+            if house_ctx is not None
+            else TargetTemps(heat=house.get("heat_c"), cool=house.get("cool_c"))
+        )
+        schedule_entity = get_active_schedule_entity(self.hass, house) if active else None
+        state = self.hass.states.get(schedule_entity) if schedule_entity else None
+        schedule_name = str(state.attributes.get("friendly_name", "")) if state is not None else ""
+        schedule_block = self._active_block_window(house_blocks, now) if active else None
+        live: dict[str, Any] = dict(house)
+        live.update(
+            {
+                "active": active,
+                "band": {"heat_c": band_targets.heat, "cool_c": band_targets.cool},
+                "source": house_target_source(now, house_blocks, house, converter) if active else None,
+                "override_active": house_override_active_at(now, house) if active else False,
+                "schedule_entity": schedule_entity or "",
+                "schedule_name": schedule_name,
+                "schedule_block": schedule_block,
+                "next_change": next_schedule_change(self.hass, house) if active else None,
+                "following_rooms": sum(1 for cycle in cycles if cycle.controllable and cycle.house_following),
+            }
+        )
+        return live
 
     # ------------------------------------------------------------------ #
     # Cycle inputs
@@ -651,6 +779,8 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         thermostat_entity: str,
         thermostat_temp_c: float | None,
         now: float,
+        house: dict,
+        house_ctx: HouseContext | None,
     ) -> _RoomCycle:
         """Read one room's sensors, openings, occupancy, targets and covers."""
         room = self._without_pending_override_seed(room)
@@ -685,6 +815,8 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         await self._async_read_schedule(area_id, room, cycle, now)
         cycle.raw_open, cycle.window_open, cycle.window_pending = self._read_window_state(area_id, room)
         cycle.door = self._door_manager.resolve_and_update(self.hass, area_id, room, now)
+        cycle.house_following = self._room_follows_house(room, house) and house_ctx is not None
+        converter = partial(ha_temp_to_celsius, self.hass)
         cycle.occupancy = self._occupancy_manager.step_room(
             self.hass,
             area_id,
@@ -694,6 +826,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             presence_away=cycle.presence_away,
             vacation_active=cycle.vacation_active,
             override_active=is_override_active(room),
+            room_setting_active=schedule_block_sets_target(now, cycle.schedule_blocks, converter),
             window_open=cycle.window_open,
             current_temp_c=current_temp,
         )
@@ -702,6 +835,8 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             settings,
             cycle,
             now,
+            house,
+            house_ctx,
         )
         cycle.force_off = self._room_force_off(room, cycle.targets)
         cycle.effective_temp = (
@@ -878,18 +1013,40 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         result["air_quality_reason"] = bad[0] if bad else None
         return result
 
+    @staticmethod
+    def _reason_for_source(source: TargetSource, room_vacant: bool) -> str:
+        """Live ``target_reason`` string for a resolved target source.
+
+        The public strings stay exactly as before: only the house rung is new.
+        Room schedule / room base deliberately report an empty reason.
+        """
+        if source == TargetSource.OVERRIDE:
+            return TARGET_REASON_OVERRIDE
+        if source == TargetSource.PLANT_OVERRIDE:
+            return TARGET_REASON_PLANT_OVERRIDE
+        if source == TargetSource.VACATION:
+            return TARGET_REASON_VACATION
+        if source == TargetSource.AWAY:
+            return TARGET_REASON_AWAY
+        if room_vacant:
+            return TARGET_REASON_VACANT
+        if source == TargetSource.HOUSE:
+            return TARGET_REASON_HOUSE
+        return ""
+
     def _resolve_targets(
         self,
         room: dict,
         settings: dict,
         cycle: _RoomCycle,
         now: float,
+        house: dict,
+        house_ctx: HouseContext | None,
     ) -> tuple[TargetTemps, str, float, tuple[float, float]]:
         """Resolve the room's targets, what set them, its mold boost and price shift."""
         room_vacant = cycle.occupancy.is_vacant
-        reason = self._target_reason(room, settings, cycle.presence_away, room_vacant, now)
-        climate_mode = room.get("climate_mode", "auto")
-        targets = resolve_targets_at_time(
+        climate_mode = self._effective_climate_mode(room, house, house_ctx is not None)
+        targets, source = resolve_targets_with_source(
             now,
             cycle.schedule_blocks,
             room.get("override_until"),
@@ -910,7 +1067,19 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             plant_override_until=settings.get("plant_override_until"),
             plant_override_heat=settings.get("plant_override_heat"),
             plant_override_cool=settings.get("plant_override_cool"),
+            house=house_ctx,
+            follow_house=cycle.house_following,
         )
+        reason = self._reason_for_source(source, room_vacant)
+        # ``make_target_resolver`` (MPC) applies the house price shift and the
+        # per-timestamp hold suppression itself; mirror that here for the live
+        # band so a following room's displayed price shift matches the plan.
+        hold_active = (
+            bool(house_ctx.hold_active_at(now))
+            if house_ctx is not None and house_ctx.hold_active_at is not None
+            else False
+        )
+        shift_override = house_ctx.price_shift if house_ctx is not None and cycle.house_following else None
         targets, shift = price_shifted(
             targets,
             now,
@@ -919,6 +1088,8 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             self._price_manager.signal,
             presence_away=cycle.presence_away,
             room_vacant=room_vacant,
+            shift_override=shift_override,
+            house_override_active=hold_active,
         )
 
         mold_boost = 0.0
@@ -937,32 +1108,6 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             # The boost cannot heat a room without a heating side; nothing to lift.
             mold_boost = 0.0
         return targets, reason, mold_boost, shift
-
-    def _target_reason(
-        self,
-        room: dict,
-        settings: dict,
-        presence_away: bool,
-        room_vacant: bool,
-        now: float,
-    ) -> str:
-        """Which branch set the room's targets (empty for the schedule/comfort band)."""
-        override_until = room.get("override_until")
-        has_room_override = room.get("override_heat") is not None or room.get("override_cool") is not None
-        if has_room_override and (override_until is None or now < float(override_until)):
-            suppressed = presence_away and bool(settings.get("presence_clears_override", False))
-            if not suppressed:
-                return TARGET_REASON_OVERRIDE
-        if is_plant_override_at(now, settings, presence_away=presence_away):
-            return TARGET_REASON_PLANT_OVERRIDE
-        vacation_until = settings.get("vacation_until")
-        if vacation_until is not None and now < float(vacation_until) and settings.get("vacation_temp") is not None:
-            return TARGET_REASON_VACATION
-        if presence_away:
-            return TARGET_REASON_AWAY
-        if room_vacant:
-            return TARGET_REASON_VACANT
-        return ""
 
     # ------------------------------------------------------------------ #
     # House reference, guards and plan
@@ -1033,14 +1178,16 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         controlled = [cycle for cycle in cycles if cycle.controllable]
         return not controlled or all(cycle.force_off for cycle in controlled)
 
-    @staticmethod
-    def _house_climate_mode(cycles: list[_RoomCycle]) -> str:
+    def _house_climate_mode(self, cycles: list[_RoomCycle], house: dict, house_active: bool) -> str:
         """The plant's climate mode: heat_only, cool_only or auto from the enabled rooms.
 
         Only a house whose every enabled room allows one side gets that
         one-sided plant mode; a single auto room keeps both sides available.
+        A room following an active house contributes the house's mode.
         """
-        modes = [str(cycle.room.get("climate_mode", "auto")) for cycle in cycles if cycle.controllable]
+        modes = [
+            self._effective_climate_mode(cycle.room, house, house_active) for cycle in cycles if cycle.controllable
+        ]
         if modes and all(mode == CLIMATE_MODE_HEAT_ONLY for mode in modes):
             return CLIMATE_MODE_HEAT_ONLY
         if modes and all(mode == CLIMATE_MODE_COOL_ONLY for mode in modes):
@@ -1087,6 +1234,9 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         cloud_series: list[float | None] | None,
         now: float,
         wet_coil_locked: bool,
+        house: dict,
+        house_ctx: HouseContext | None,
+        house_active: bool,
     ) -> CentralMPCPlan:
         """Build the room horizon inputs and hand the whole home to the joint MPC."""
         n_blocks = MIN_HORIZON_BLOCKS
@@ -1099,8 +1249,9 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             if not cycle.controllable or cycle.current_temp is None:
                 continue
             room = cycle.room
-            room_can_heat = room.get("climate_mode", "auto") != CLIMATE_MODE_COOL_ONLY
-            room_can_cool = room.get("climate_mode", "auto") != CLIMATE_MODE_HEAT_ONLY
+            effective_mode = self._effective_climate_mode(room, house, house_active)
+            room_can_heat = effective_mode != CLIMATE_MODE_COOL_ONLY
+            room_can_cool = effective_mode != CLIMATE_MODE_HEAT_ONLY
             estimator = self._model_manager.get_estimator(cycle.area_id)
             estimators[cycle.area_id] = estimator
             priority, occupied = self._occupancy_series(cycle, settings, now, n_blocks)
@@ -1113,15 +1264,17 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                 mold_prevention_delta=cycle.mold.prevention_delta,
                 room_vacant=cycle.occupancy.is_vacant,
                 price_signal=self._price_manager.signal,
+                house=house_ctx,
+                follow_house=cycle.house_following,
             )
             targets = [resolver(now + k * step_seconds) for k in range(n_blocks)]
             # A room that may only cool never asks the whole-home plan for heat (and
             # the other way round); its Guardrail Band still protects it.
             comfort_heat: list[float | None] = [item.heat for item in targets]
             comfort_cool: list[float | None] = [item.cool for item in targets]
-            if room.get("climate_mode") == CLIMATE_MODE_COOL_ONLY:
+            if effective_mode == CLIMATE_MODE_COOL_ONLY:
                 comfort_heat = [None] * n_blocks
-            elif room.get("climate_mode") == CLIMATE_MODE_HEAT_ONLY:
+            elif effective_mode == CLIMATE_MODE_HEAT_ONLY:
                 comfort_cool = [None] * n_blocks
             solar = build_solar_series(
                 self.hass.config.latitude,
@@ -1191,6 +1344,11 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         def override_active_at(ts: float) -> bool:
             return is_override_active(cycle.room) and (override_until is None or ts < override_until)
 
+        converter = partial(ha_temp_to_celsius, self.hass)
+
+        def room_setting_at(ts: float) -> bool:
+            return schedule_block_sets_target(ts, cycle.schedule_blocks, converter)
+
         return self._occupancy_manager.build_priority_series(
             cycle.area_id,
             cycle.room,
@@ -1200,6 +1358,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             PLAN_DT_MINUTES,
             schedule_active_at=schedule_active_at,
             override_active_at=override_active_at,
+            room_setting_at=room_setting_at,
             presence_away=cycle.presence_away,
             vacation_active=cycle.vacation_active,
             window_open=cycle.window_open,
@@ -1512,6 +1671,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             "mold_prevention_active": cycle.mold.prevention_active,
             "mold_prevention_delta": cycle.mold.prevention_delta,
             "target_reason": cycle.target_reason,
+            "house_following": cycle.house_following,
             "mold_boost": cycle.mold_boost,
             "price_shift_heat": cycle.price_shift[0],
             "price_shift_cool": cycle.price_shift[1],
@@ -1584,6 +1744,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             "mold_prevention_active": False,
             "mold_prevention_delta": 0,
             "target_reason": "",
+            "house_following": False,
             "mold_boost": 0.0,
             "price_shift_heat": 0.0,
             "price_shift_cool": 0.0,

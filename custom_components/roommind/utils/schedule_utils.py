@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -31,6 +33,41 @@ from ..const import (
 from .price_utils import PriceSignal, apply_price_shift
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class TargetSource(StrEnum):
+    """Which rung of the target ladder produced a room's resolved targets."""
+
+    OVERRIDE = "override"
+    PLANT_OVERRIDE = "plant_override"
+    VACATION = "vacation"
+    AWAY = "away"
+    ROOM_SCHEDULE = "room_schedule"
+    HOUSE = "house"
+    ROOM_BASE = "room_base"
+
+
+@dataclass(frozen=True)
+class HouseContext:
+    """Resolved house-layer inputs passed into a room's target resolver.
+
+    ``target_at`` resolves the house's own targets at a timestamp (override /
+    active schedule block / comfort pair), so the room resolver stays a pure
+    function of its inputs. ``eco_heat_c`` / ``eco_cool_c`` are the band used to
+    cap an empty following room; ``price_shift`` is the house's own opt-in and
+    replaces the room's when the room follows an active house.
+    ``hold_active_at`` reports, per timestamp, whether the house's manual hold
+    is in force so a later MPC block cannot inherit a stale hold flag.
+    """
+
+    active: bool
+    heat_c: float | None
+    cool_c: float | None
+    eco_heat_c: float | None
+    eco_cool_c: float | None
+    target_at: Callable[[float], TargetTemps]
+    price_shift: float = 0.0
+    hold_active_at: Callable[[float], bool] | None = None
 
 
 def find_active_block(schedule_blocks: dict, ts: float) -> dict[str, Any] | None:
@@ -286,7 +323,7 @@ def resolve_target_at_time(
     return eco_temp
 
 
-def resolve_targets_at_time(
+def resolve_targets_with_source(
     ts: float,
     schedule_blocks: dict | None,
     override_until: float | None,
@@ -307,20 +344,27 @@ def resolve_targets_at_time(
     plant_override_until: float | None = None,
     plant_override_heat: float | None = None,
     plant_override_cool: float | None = None,
-) -> TargetTemps:
-    """Resolve dual heat/cool target temps at a specific timestamp.
+    *,
+    house: HouseContext | None = None,
+    follow_house: bool = False,
+) -> tuple[TargetTemps, TargetSource]:
+    """Resolve dual heat/cool targets and the ladder rung that produced them.
 
-    Returns TargetTemps(heat, cool). None values mean "force off".
-    ``room_vacant`` caps the schedule result at eco (occupancy eco, #180).
+    Rungs, highest first: room override, plant (Central Thermostat) override,
+    vacation, presence-away, a room schedule block carrying a sanitized
+    temperature, an active followed house, then the room's own base schedule /
+    comfort / eco / off. ``None`` sides mean "force off". The occupancy eco cap
+    applies only to the last three rungs; when a following room is empty it
+    uses the house's eco pair, never the room's.
 
-    A whole-home plant override (``plant_override_heat`` / ``plant_override_cool``) sits
-    between the per-room override and the vacation branch; a one-sided wall setpoint takes
-    the other side from the schedule it replaces instead of crossing the heat/cool band.
+    A deliberately held house target is reported as ``TargetSource.HOUSE``;
+    ``schedule_sets_target(house_override_active=...)`` is the companion guard
+    that keeps such a hold out of the electricity-price shift.
     """
     # 1. Override — split heat/cool dead-band (skipped when presence-away suppresses it)
     if (override_heat is not None or override_cool is not None) and (override_until is None or ts < override_until):
         if not (presence_away and presence_clears_override):
-            return TargetTemps(heat=override_heat, cool=override_cool)
+            return TargetTemps(heat=override_heat, cool=override_cool), TargetSource.OVERRIDE
     # 2. Whole-home plant override — the Central Thermostat wall setpoint wins over the schedule
     if (
         (plant_override_heat is not None or plant_override_cool is not None)
@@ -344,21 +388,103 @@ def resolve_targets_at_time(
                 c = h
             else:
                 h = c
-        return TargetTemps(heat=h, cool=c)
+        return TargetTemps(heat=h, cool=c), TargetSource.PLANT_OVERRIDE
     # 3. Vacation — heat setback, cooling stays at eco_cool
     if vacation_until is not None and ts < vacation_until and vacation_temp is not None:
         t = float(vacation_temp)
-        return TargetTemps(heat=t, cool=max(t, eco_cool))
+        return TargetTemps(heat=t, cool=max(t, eco_cool)), TargetSource.VACATION
     # 4. Presence
     if presence_away:
         if presence_away_action == "off":
-            return TargetTemps(heat=None, cool=None)
-        return TargetTemps(heat=eco_heat, cool=eco_cool)
-    # 5. Schedule blocks
+            return TargetTemps(heat=None, cool=None), TargetSource.AWAY
+        return TargetTemps(heat=eco_heat, cool=eco_cool), TargetSource.AWAY
+
+    active_house = house if house is not None and follow_house and house.active else None
+    if active_house is not None:
+        cap_heat = active_house.eco_heat_c if active_house.eco_heat_c is not None else eco_heat
+        cap_cool = active_house.eco_cool_c if active_house.eco_cool_c is not None else eco_cool
+    else:
+        cap_heat, cap_cool = eco_heat, eco_cool
+
+    # 5. A room schedule block with a usable temperature outranks the house
+    if schedule_block_sets_target(ts, schedule_blocks, block_temp_converter):
+        targets = _schedule_targets_at_time(
+            ts,
+            schedule_blocks,
+            comfort_heat,
+            comfort_cool,
+            eco_heat,
+            eco_cool,
+            block_temp_converter,
+            schedule_off_action,
+        )
+        return (cap_to_eco(targets, cap_heat, cap_cool) if room_vacant else targets), TargetSource.ROOM_SCHEDULE
+    # 6. A following room in a schedule gap inherits the house's band
+    if active_house is not None:
+        targets = active_house.target_at(ts)
+        return (cap_to_eco(targets, cap_heat, cap_cool) if room_vacant else targets), TargetSource.HOUSE
+    # 7. Room base: comfort, a block without temperatures, eco or off
     targets = _schedule_targets_at_time(
         ts, schedule_blocks, comfort_heat, comfort_cool, eco_heat, eco_cool, block_temp_converter, schedule_off_action
     )
-    return cap_to_eco(targets, eco_heat, eco_cool) if room_vacant else targets
+    return (cap_to_eco(targets, eco_heat, eco_cool) if room_vacant else targets), TargetSource.ROOM_BASE
+
+
+def resolve_targets_at_time(
+    ts: float,
+    schedule_blocks: dict | None,
+    override_until: float | None,
+    override_heat: float | None,
+    override_cool: float | None,
+    vacation_until: float | None,
+    vacation_temp: float | None,
+    comfort_heat: float,
+    comfort_cool: float,
+    eco_heat: float,
+    eco_cool: float,
+    presence_away: bool = False,
+    block_temp_converter: Callable[[float], float] | None = None,
+    presence_away_action: str = "eco",
+    schedule_off_action: str = "eco",
+    presence_clears_override: bool = False,
+    room_vacant: bool = False,
+    plant_override_until: float | None = None,
+    plant_override_heat: float | None = None,
+    plant_override_cool: float | None = None,
+    *,
+    house: HouseContext | None = None,
+    follow_house: bool = False,
+) -> TargetTemps:
+    """Compatibility wrapper around ``resolve_targets_with_source`` for targets only.
+
+    With no house (or with ``follow_house`` False) the result is byte-for-byte
+    the v3.0.0 resolution. See ``resolve_targets_with_source`` for the ladder.
+    """
+    targets, _ = resolve_targets_with_source(
+        ts,
+        schedule_blocks,
+        override_until,
+        override_heat,
+        override_cool,
+        vacation_until,
+        vacation_temp,
+        comfort_heat,
+        comfort_cool,
+        eco_heat,
+        eco_cool,
+        presence_away,
+        block_temp_converter,
+        presence_away_action,
+        schedule_off_action,
+        presence_clears_override,
+        room_vacant,
+        plant_override_until,
+        plant_override_heat,
+        plant_override_cool,
+        house=house,
+        follow_house=follow_house,
+    )
+    return targets
 
 
 def cap_to_eco(targets: TargetTemps, eco_heat: float, eco_cool: float) -> TargetTemps:
@@ -408,6 +534,155 @@ def _schedule_targets_at_time(
     if schedule_off_action == "off":
         return TargetTemps(heat=None, cool=None)
     return TargetTemps(heat=eco_heat, cool=eco_cool)
+
+
+def schedule_block_sets_target(
+    ts: float,
+    schedule_blocks: dict | None,
+    block_temp_converter: Callable[[float], float] | None = None,
+) -> bool:
+    """Whether the block active at ``ts`` carries at least one usable temperature.
+
+    A block without temperatures (or with only implausible ones) leaves the
+    target to comfort/eco, so it must not win a rung of the ladder on its own.
+    Shared with the coordinator for arbitration and the room's reason text.
+    """
+    if not schedule_blocks:
+        return False
+    data = find_active_block(schedule_blocks, ts)
+    if data is None:
+        return False
+    for raw in (data.get("heat_temperature"), data.get("cool_temperature"), data.get("temperature")):
+        if raw is not None and sanitize_block_temp(raw, block_temp_converter) is not None:
+            return True
+    return False
+
+
+def _house_block_targets_at_time(
+    ts: float,
+    house_blocks: dict | None,
+    house: dict,
+    block_temp_converter: Callable[[float], float] | None,
+) -> TargetTemps:
+    """House targets from the active block or, lacking one, the comfort pair.
+
+    Never eco, never "off": the house layer holds its comfort band even in a
+    schedule gap. A side the block leaves out (or that fails sanitization)
+    comes from the house comfort pair; a single ``temperature`` sets both.
+    """
+    heat_c = house.get("heat_c")
+    cool_c = house.get("cool_c")
+    if house_blocks:
+        data = find_active_block(house_blocks, ts)
+        if data is not None:
+            h_raw = data.get("heat_temperature")
+            c_raw = data.get("cool_temperature")
+            if h_raw is not None or c_raw is not None:
+                h = heat_c
+                c = cool_c
+                if h_raw is not None:
+                    val = sanitize_block_temp(h_raw, block_temp_converter)
+                    if val is not None:
+                        h = val
+                if c_raw is not None:
+                    val = sanitize_block_temp(c_raw, block_temp_converter)
+                    if val is not None:
+                        c = val
+                return TargetTemps(heat=h, cool=c)
+            single = data.get("temperature")
+            if single is not None:
+                val = sanitize_block_temp(single, block_temp_converter)
+                if val is not None:
+                    return TargetTemps(heat=val, cool=val)
+    return TargetTemps(heat=heat_c, cool=cool_c)
+
+
+def house_override_active_at(ts: float, house: dict) -> bool:
+    """Whether the house's manual hold is in force at ``ts``.
+
+    Same expiry semantics as a plant override, without presence suppression:
+    an open-ended hold (``override_until`` None) is always active once a side
+    is set, otherwise the hold ends at its timestamp. Exported so the
+    coordinator can build ``HouseContext.hold_active_at`` from the house dict.
+    """
+    if house.get("override_heat") is None and house.get("override_cool") is None:
+        return False
+    until = house.get("override_until")
+    return until is None or ts < until
+
+
+def _house_override_in_force(ts: float, house: dict) -> bool:
+    """Whether the house's manual hold is active at ``ts``."""
+    return house_override_active_at(ts, house)
+
+
+def resolve_house_targets_at_time(
+    ts: float,
+    house_blocks: dict | None,
+    house: dict,
+    block_temp_converter: Callable[[float], float] | None = None,
+) -> TargetTemps:
+    """Resolve the house's own heat/cool targets at ``ts``.
+
+    A manual house override wins; a one-sided override takes the missing side
+    from the active block / comfort pair without crossing the band. Otherwise
+    an active block with temperatures replaces the corresponding sides of the
+    house comfort pair, and a schedule gap simply falls back to that pair.
+    Eco and "off" never appear at the house layer.
+    """
+    house = house or {}
+    if _house_override_in_force(ts, house):
+        sched = _house_block_targets_at_time(ts, house_blocks, house, block_temp_converter)
+        h = house.get("override_heat")
+        c = house.get("override_cool")
+        h = h if h is not None else sched.heat
+        c = c if c is not None else sched.cool
+        if h is not None and c is not None and c < h:
+            if house.get("override_cool") is None:
+                c = h
+            else:
+                h = c
+        return TargetTemps(heat=h, cool=c)
+    return _house_block_targets_at_time(ts, house_blocks, house, block_temp_converter)
+
+
+def house_target_source(
+    ts: float,
+    house_blocks: dict | None,
+    house: dict,
+    block_temp_converter: Callable[[float], float] | None = None,
+) -> str:
+    """Reason string for a house target: "override", "schedule" or "target"."""
+    house = house or {}
+    if _house_override_in_force(ts, house):
+        return "override"
+    if schedule_block_sets_target(ts, house_blocks, block_temp_converter):
+        return "schedule"
+    return "target"
+
+
+def make_house_target_resolver(
+    house_blocks: dict | None,
+    house: dict,
+    hass: HomeAssistant | None = None,
+) -> Callable[[float], TargetTemps]:
+    """Create a sync house target resolver with the temperature converter built once."""
+    converter: Callable[[float], float] | None = None
+    if hass is not None:
+        from .temp_utils import ha_temp_to_celsius
+
+        _hass = hass
+        converter = lambda v: ha_temp_to_celsius(_hass, v)  # noqa: E731
+    return lambda ts: resolve_house_targets_at_time(ts, house_blocks, house, converter)
+
+
+def house_override_hold_until(hass: HomeAssistant, house: dict, now: float | None = None) -> float | None:
+    """End of a house hold-until-schedule-change; identical rules to a room's.
+
+    The house uses the same ``schedules`` / ``schedule_selector_entity`` keys as
+    a room, so the room helper resolves its schedule entity directly.
+    """
+    return override_hold_until(hass, house, now=now)
 
 
 def resolve_schedule_index(
@@ -557,14 +832,24 @@ async def read_schedule_blocks(
     return None
 
 
-def schedule_sets_target(ts: float, room: dict, settings: dict, *, presence_away: bool, room_vacant: bool) -> bool:
+def schedule_sets_target(
+    ts: float,
+    room: dict,
+    settings: dict,
+    *,
+    presence_away: bool,
+    room_vacant: bool,
+    house_override_active: bool = False,
+) -> bool:
     """Whether the schedule (or comfort/eco without one) sets the target at ``ts``.
 
-    Only then may the electricity price shift it: an override, a whole-home plant override
-    and vacation/absence lower the target on purpose, and an empty room never gets more than
-    eco (#180).
+    Only then may the electricity price shift it: an override, a whole-home plant override,
+    a deliberate house hold and vacation/absence lower the target on purpose, and an empty
+    room never gets more than eco (#180). ``house_override_active`` is evaluated per
+    timestamp by the caller, so a hold ending inside the horizon stops suppressing the
+    price shift at the right block.
     """
-    if presence_away or room_vacant:
+    if presence_away or room_vacant or house_override_active:
         return False
     vacation_until = settings.get("vacation_until")
     if vacation_until is not None and settings.get("vacation_temp") is not None and ts < vacation_until:
@@ -588,17 +873,28 @@ def price_shifted(
     *,
     presence_away: bool,
     room_vacant: bool,
+    shift_override: float | None = None,
+    house_override_active: bool = False,
 ) -> tuple[TargetTemps, tuple[float, float]]:
     """Targets moved with the price where the room opted in, and the (heat, cool) shift applied.
 
     Central heating is a fuel furnace while central cooling is an electric heat pump, so the
     electricity price shifts the cooling side by default; the Central Plant setting
     ``price_shift_modes`` of "both" opts into shifting the heating target as well.
+    ``shift_override`` replaces the room's own ``price_shift`` when following an active
+    house, and ``house_override_active`` suppresses the shift during a house hold.
     """
-    shift = float(room.get("price_shift") or 0.0)
+    shift = float((room.get("price_shift") or 0.0) if shift_override is None else shift_override)
     if price_signal is None or shift <= 0 or room.get("is_outdoor"):
         return targets, (0.0, 0.0)
-    if not schedule_sets_target(ts, room, settings, presence_away=presence_away, room_vacant=room_vacant):
+    if not schedule_sets_target(
+        ts,
+        room,
+        settings,
+        presence_away=presence_away,
+        room_vacant=room_vacant,
+        house_override_active=house_override_active,
+    ):
         return targets, (0.0, 0.0)
     shifted = apply_price_shift(targets, price_signal.direction_at(ts), shift)
 
@@ -628,11 +924,17 @@ def make_target_resolver(
     mold_prevention_delta: float = 0.0,
     room_vacant: bool = False,
     price_signal: PriceSignal | None = None,
+    house: HouseContext | None = None,
+    follow_house: bool = False,
 ) -> Callable[[float], TargetTemps]:
     """Create a sync target resolver function (schedule blocks pre-fetched).
 
     Returns TargetTemps with None values for timestamps where devices should
-    be turned off.
+    be turned off. With ``house`` (and ``follow_house``) set, the resolved
+    ladder can stop at the house rung; the price shift and the hold suppression
+    are then taken from the house context instead of the room. The house hold
+    is checked per timestamp so a hold expiring inside the MPC horizon stops
+    suppressing the shift at the right block.
     """
     comfort_heat = room.get("comfort_heat", room.get("comfort_temp", DEFAULT_COMFORT_HEAT))
     comfort_cool = room.get("comfort_cool", DEFAULT_COMFORT_COOL)
@@ -650,6 +952,7 @@ def make_target_resolver(
     plant_override_heat = settings.get("plant_override_heat")
     plant_override_cool = settings.get("plant_override_cool")
     climate_mode = room.get("climate_mode", "auto")
+    active_house = house if house is not None and follow_house and house.active else None
 
     converter: Callable[[float], float] | None = None
     if hass is not None:
@@ -659,7 +962,7 @@ def make_target_resolver(
         converter = lambda v: ha_temp_to_celsius(_hass, v)  # noqa: E731
 
     def resolver(ts: float) -> TargetTemps:
-        targets = resolve_targets_at_time(
+        targets, _ = resolve_targets_with_source(
             ts,
             schedule_blocks,
             override_until,
@@ -680,11 +983,26 @@ def make_target_resolver(
             plant_override_until=plant_override_until,
             plant_override_heat=plant_override_heat,
             plant_override_cool=plant_override_cool,
+            house=house,
+            follow_house=follow_house,
         )
         if targets.heat is None and targets.cool is None:
             return targets
+        hold_active = (
+            bool(active_house.hold_active_at(ts))
+            if active_house is not None and active_house.hold_active_at is not None
+            else False
+        )
         targets, _ = price_shifted(
-            targets, ts, room, settings, price_signal, presence_away=presence_away, room_vacant=room_vacant
+            targets,
+            ts,
+            room,
+            settings,
+            price_signal,
+            presence_away=presence_away,
+            room_vacant=room_vacant,
+            shift_override=active_house.price_shift if active_house is not None else None,
+            house_override_active=hold_active,
         )
         return TargetTemps(
             *cap_cool_only_heat(

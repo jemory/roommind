@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 // The card is loaded on every dashboard page; ship only the strings it uses.
 const CARD_KEY_PREFIXES = [
   "roomcard.",
+  "housecard.",
+  "house.",
   "override.",
   "mode.",
   "card.",

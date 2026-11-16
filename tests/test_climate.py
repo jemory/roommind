@@ -3,14 +3,26 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from homeassistant.components.climate import ClimateEntityFeature, HVACAction, HVACMode
+from homeassistant.components.climate import (
+    ATTR_TARGET_TEMP_HIGH,
+    ATTR_TARGET_TEMP_LOW,
+    PRESET_COMFORT,
+    PRESET_ECO,
+    PRESET_NONE,
+    ClimateEntityFeature,
+    HVACAction,
+    HVACMode,
+)
 from homeassistant.const import UnitOfTemperature
 
 from custom_components.roommind.climate import (
     OVERRIDE_TURN_ON_REFRESH_DELAY_S,
+    PRESET_MANUAL,
+    RoomMindHouseClimate,
     RoomMindOverrideClimate,
     RoomMindRoomClimate,
     _create_room_climates,
@@ -20,7 +32,9 @@ from custom_components.roommind.const import (
     DEFAULT_COMFORT_COOL,
     DEFAULT_COMFORT_HEAT,
     DOMAIN,
+    OVERRIDE_BOOST,
     OVERRIDE_CUSTOM,
+    OVERRIDE_ECO,
 )
 
 
@@ -134,7 +148,7 @@ def test_hvac_mode_cool_when_cool_only(mock_coordinator):
     assert entity.hvac_mode == HVACMode.COOL
 
 
-@pytest.mark.parametrize("entity_class", [RoomMindOverrideClimate, RoomMindRoomClimate])
+@pytest.mark.parametrize("entity_class", [RoomMindOverrideClimate, RoomMindRoomClimate, RoomMindHouseClimate])
 @pytest.mark.parametrize(
     "name",
     ["current_temperature", "target_temperature", "target_temperature_low", "target_temperature_high"],
@@ -144,9 +158,12 @@ def test_temperatures_are_served_under_both_names(entity_class, name):
     assert getattr(entity_class, name) is getattr(entity_class, f"native_{name}")
 
 
-@pytest.mark.parametrize("entity_class", [RoomMindOverrideClimate, RoomMindRoomClimate])
+@pytest.mark.parametrize("entity_class", [RoomMindOverrideClimate, RoomMindRoomClimate, RoomMindHouseClimate])
 def test_temperature_unit_is_celsius_under_both_names(entity_class, mock_coordinator):
-    entity = entity_class(mock_coordinator[0], "living_room")
+    if entity_class is RoomMindHouseClimate:
+        entity = entity_class(mock_coordinator[0])
+    else:
+        entity = entity_class(mock_coordinator[0], "living_room")
     assert entity._attr_native_temperature_unit == UnitOfTemperature.CELSIUS
     assert entity.temperature_unit == UnitOfTemperature.CELSIUS
 
@@ -514,13 +531,14 @@ async def test_async_setup_entry_creates_entities_for_all_rooms():
     entities = async_add_entities.call_args[0][0]
     assert sum(isinstance(e, RoomMindOverrideClimate) for e in entities) == 2
     assert sum(isinstance(e, RoomMindRoomClimate) for e in entities) == 2
+    assert sum(isinstance(e, RoomMindHouseClimate) for e in entities) == 1
     assert "living_room" in coordinator._climate_entity_areas
     assert "bedroom" in coordinator._climate_entity_areas
 
 
 @pytest.mark.asyncio
 async def test_async_setup_entry_no_rooms():
-    """async_setup_entry does not call async_add_entities when no rooms exist."""
+    """With no rooms, async_setup_entry still adds the single global house entity."""
     coordinator = MagicMock()
     coordinator._climate_entity_areas = set()
 
@@ -537,7 +555,10 @@ async def test_async_setup_entry_no_rooms():
 
     await async_setup_entry(hass, entry, async_add_entities)
 
-    async_add_entities.assert_not_called()
+    async_add_entities.assert_called_once()
+    entities = async_add_entities.call_args[0][0]
+    assert len(entities) == 1
+    assert isinstance(entities[0], RoomMindHouseClimate)
 
 
 def _live(coordinator, **fields):
@@ -755,3 +776,425 @@ async def test_removal_cancels_pending_refresh(mock_coordinator, call_later):
     with patch("custom_components.roommind.climate.CoordinatorEntity.async_will_remove_from_hass", AsyncMock()):
         await entity.async_will_remove_from_hass()
     call_later.cancel.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# House climate entity (#T6)
+# ---------------------------------------------------------------------------
+
+
+HOUSE_NEXT_EVENT = time.time() + 6 * 3600
+
+
+def _live_house(**overrides):
+    """The frozen coordinator.data['house'] shape (resolved settings + live fields)."""
+    house = {
+        "enabled": True,
+        "heat_c": 21.0,
+        "cool_c": 24.0,
+        "eco_heat_c": 17.0,
+        "eco_cool_c": 27.0,
+        "climate_mode": "auto",
+        "schedules": [{"entity_id": "schedule.house"}],
+        "schedule_selector_entity": "",
+        "preheat_enabled": True,
+        "price_shift": 0.0,
+        "override_heat": None,
+        "override_cool": None,
+        "override_until": None,
+        "override_type": None,
+        "active": True,
+        "band": {"heat_c": 21.0, "cool_c": 24.0},
+        "source": "target",
+        "override_active": False,
+        "schedule_entity": "schedule.house",
+        "schedule_name": "House schedule",
+        "schedule_block": {"from": "08:00:00", "to": "17:00:00"},
+        "next_change": HOUSE_NEXT_EVENT,
+        "following_rooms": 3,
+    }
+    house.update(overrides)
+    return house
+
+
+@pytest.fixture
+def house_setup():
+    coordinator = MagicMock()
+    coordinator.hass = MagicMock()
+    coordinator.hass.config.units.temperature_unit = UnitOfTemperature.CELSIUS
+    coordinator.async_request_refresh = AsyncMock()
+    store = MagicMock()
+    store.get_settings.return_value = {}
+    store.async_save_settings = AsyncMock()
+    coordinator.hass.data = {DOMAIN: {"store": store}}
+    coordinator.data = {
+        "house": _live_house(),
+        "central_plant": {"action": "heating", "house_ref_temp": 22.3},
+        "rooms": {},
+    }
+    states = {}
+    schedule = MagicMock()
+    schedule.attributes = {"next_event": datetime.fromtimestamp(HOUSE_NEXT_EVENT, tz=UTC)}
+    states["schedule.house"] = schedule
+    coordinator.hass.states.get = states.get
+
+    def make(house=None, plant=None, settings=None, data_missing_house=False):
+        if settings is not None:
+            store.get_settings.return_value = settings
+        if data_missing_house:
+            coordinator.data = {} if plant is None else {"central_plant": plant}
+        else:
+            coordinator.data = {
+                "house": _live_house() if house is None else house,
+                "central_plant": plant if plant is not None else {"action": "heating", "house_ref_temp": 22.3},
+                "rooms": {},
+            }
+        entity = RoomMindHouseClimate(coordinator)
+        entity.hass = coordinator.hass
+        return entity
+
+    with patch.object(RoomMindHouseClimate, "async_write_ha_state"):
+        yield make, coordinator, store, states
+
+
+def test_house_entity_ids_and_name(house_setup):
+    make, *_ = house_setup
+    entity = make()
+    assert entity.unique_id == "roommind_house_climate"
+    assert entity.entity_id == "climate.roommind_house"
+    assert entity.name == "RoomMind House"
+    assert entity.has_entity_name is False
+    assert entity.icon == "mdi:home-thermometer"
+
+
+def test_house_hvac_modes_and_features(house_setup):
+    make, *_ = house_setup
+    entity = make()
+    assert entity.hvac_modes == [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.HEAT_COOL]
+    assert entity.supported_features & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+    assert entity.supported_features & ClimateEntityFeature.PRESET_MODE
+    single = make(_live_house(climate_mode="heat_only"))
+    assert single.supported_features & ClimateEntityFeature.TARGET_TEMPERATURE
+    assert not single.supported_features & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [("auto", HVACMode.HEAT_COOL), ("heat_only", HVACMode.HEAT), ("cool_only", HVACMode.COOL)],
+)
+def test_house_hvac_mode_maps_climate_mode(house_setup, mode, expected):
+    make, *_ = house_setup
+    assert make(_live_house(climate_mode=mode)).hvac_mode == expected
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [
+        ("heating", HVACAction.HEATING),
+        ("cooling", HVACAction.COOLING),
+        ("circulating", HVACAction.FAN),
+        ("idle", HVACAction.IDLE),
+        (None, None),
+    ],
+)
+def test_house_hvac_action_from_plant(house_setup, action, expected):
+    make, *_ = house_setup
+    assert make(plant={"action": action, "house_ref_temp": 22.3}).hvac_action == expected
+
+
+def test_house_current_temperature_is_reference(house_setup):
+    make, *_ = house_setup
+    assert make(plant={"action": "idle", "house_ref_temp": 22.3}).current_temperature == 22.3
+
+
+def test_house_target_band_from_live_data(house_setup):
+    make, *_ = house_setup
+    entity = make(_live_house(band={"heat_c": 20.5, "cool_c": 23.5}))
+    assert entity.target_temperature_low == 20.5
+    assert entity.target_temperature_high == 23.5
+    assert entity.target_temperature is None  # auto keeps the dual slider
+
+
+def test_house_single_target_by_mode(house_setup):
+    make, *_ = house_setup
+    assert make(_live_house(climate_mode="heat_only")).target_temperature == 21.0
+    assert make(_live_house(climate_mode="cool_only")).target_temperature == 24.0
+
+
+def test_house_preset_reflects_override_type(house_setup):
+    make, *_ = house_setup
+    assert make().preset_mode == PRESET_NONE
+    assert (
+        make(_live_house(override_heat=21.0, override_cool=24.0, override_type="boost")).preset_mode == PRESET_COMFORT
+    )
+    assert make(_live_house(override_heat=17.0, override_cool=27.0, override_type="eco")).preset_mode == PRESET_ECO
+    assert (
+        make(_live_house(override_heat=21.0, override_cool=24.0, override_type="custom")).preset_mode == PRESET_MANUAL
+    )
+
+
+@pytest.mark.asyncio
+async def test_house_set_temperature_writes_hold_and_enables(house_setup):
+    make, _, store, _ = house_setup
+    entity = make()
+    await entity.async_set_temperature(**{ATTR_TARGET_TEMP_LOW: 22.0, ATTR_TARGET_TEMP_HIGH: 25.0})
+    written = store.async_save_settings.await_args[0][0]
+    assert written["house"]["enabled"] is True
+    assert written["house"]["override_heat"] == 22.0
+    assert written["house"]["override_cool"] == 25.0
+    assert written["house"]["override_until"] == pytest.approx(HOUSE_NEXT_EVENT)
+    assert written["house"]["override_type"] == OVERRIDE_CUSTOM
+
+
+@pytest.mark.asyncio
+async def test_house_set_temperature_echo_is_noop(house_setup):
+    make, _, store, _ = house_setup
+    await make().async_set_temperature(**{ATTR_TARGET_TEMP_LOW: 21.0, ATTR_TARGET_TEMP_HIGH: 24.0})
+    store.async_save_settings.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("preset", "override_type", "band"),
+    [
+        (PRESET_COMFORT, OVERRIDE_BOOST, (21.0, 24.0)),
+        (PRESET_ECO, OVERRIDE_ECO, (17.0, 27.0)),
+    ],
+)
+@pytest.mark.asyncio
+async def test_house_preset_writes_override(house_setup, preset, override_type, band):
+    make, _, store, _ = house_setup
+    await make().async_set_preset_mode(preset)
+    written = store.async_save_settings.await_args[0][0]["house"]
+    assert written["override_heat"] == band[0]
+    assert written["override_cool"] == band[1]
+    assert written["override_until"] == pytest.approx(HOUSE_NEXT_EVENT)
+    assert written["override_type"] == override_type
+    assert written["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_house_manual_preset_holds_band_in_force(house_setup):
+    make, _, store, _ = house_setup
+    await make(_live_house(band={"heat_c": 20.0, "cool_c": 25.0})).async_set_preset_mode(PRESET_MANUAL)
+    written = store.async_save_settings.await_args[0][0]["house"]
+    assert (written["override_heat"], written["override_cool"]) == (20.0, 25.0)
+    assert written["override_type"] == OVERRIDE_CUSTOM
+
+
+@pytest.mark.asyncio
+async def test_house_preset_none_clears_override(house_setup):
+    make, _, store, _ = house_setup
+    await make(_live_house(override_heat=21.0, override_cool=24.0, override_type="boost")).async_set_preset_mode(
+        PRESET_NONE
+    )
+    assert store.async_save_settings.await_args[0][0] == {
+        "house": {
+            "enabled": True,
+            "override_heat": None,
+            "override_cool": None,
+            "override_until": None,
+            "override_type": None,
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_house_off_only_pauses_control(house_setup):
+    make, _, store, _ = house_setup
+    entity = make()
+    await entity.async_set_hvac_mode(HVACMode.OFF)
+    store.async_save_settings.assert_awaited_once_with({"climate_control_active": False})
+
+
+@pytest.mark.parametrize(
+    ("hvac_mode", "climate_mode"),
+    [(HVACMode.HEAT, "heat_only"), (HVACMode.COOL, "cool_only"), (HVACMode.HEAT_COOL, "auto")],
+)
+@pytest.mark.asyncio
+async def test_house_mode_sets_climate_mode_and_enables(house_setup, hvac_mode, climate_mode):
+    make, _, store, _ = house_setup
+    await make().async_set_hvac_mode(hvac_mode)
+    store.async_save_settings.assert_awaited_once_with(
+        {"climate_control_active": True, "house": {"enabled": True, "climate_mode": climate_mode}}
+    )
+
+
+@pytest.mark.asyncio
+async def test_house_turn_on_off_delegate(house_setup):
+    make, _, store, _ = house_setup
+    entity = make(_live_house(climate_mode="cool_only"))
+    await entity.async_turn_on()
+    assert store.async_save_settings.await_args[0][0]["house"]["climate_mode"] == "cool_only"
+    await entity.async_turn_off()
+    assert store.async_save_settings.await_args[0][0] == {"climate_control_active": False}
+
+
+def test_house_control_paused_reports_off(house_setup):
+    make, _, _, _ = house_setup
+    entity = make(settings={"climate_control_active": False})
+    assert entity.hvac_mode == HVACMode.OFF
+    assert entity.hvac_action == HVACAction.OFF
+
+
+def test_house_disabled_reports_off_without_raising(house_setup):
+    make, *_ = house_setup
+    entity = make(_live_house(enabled=False, active=False))
+    assert entity.hvac_mode == HVACMode.OFF
+    assert entity.hvac_action == HVACAction.OFF
+
+
+def test_house_empty_coordinator_data_falls_back_to_store(house_setup):
+    make, _, _, _ = house_setup
+    entity = make(data_missing_house=True, settings={"house": _live_house()})
+    # No central plant / house band in data: must not raise, targets fall back to the pair.
+    assert entity.hvac_mode == HVACMode.HEAT_COOL
+    assert entity.current_temperature is None
+    assert entity.target_temperature_low == 21.0
+    assert entity.target_temperature_high == 24.0
+
+
+def test_house_extra_state_attributes(house_setup):
+    make, *_ = house_setup
+    attrs = make(
+        _live_house(
+            override_heat=21.0,
+            override_cool=24.0,
+            override_until=HOUSE_NEXT_EVENT,
+            override_type="boost",
+        ),
+        plant={"action": "heating", "house_ref_temp": 22.3},
+    ).extra_state_attributes
+    assert attrs["enabled"] is True
+    assert attrs["active"] is True
+    assert attrs["heat_c"] == 21.0
+    assert attrs["cool_c"] == 24.0
+    assert attrs["eco_heat_c"] == 17.0
+    assert attrs["eco_cool_c"] == 27.0
+    assert attrs["climate_mode"] == "auto"
+    assert attrs["override_until"] is not None
+    assert attrs["source"] == "target"
+    assert attrs["schedule_entity"] == "schedule.house"
+    assert attrs["schedule_name"] == "House schedule"
+    assert attrs["schedule_block"] == {"from": "08:00:00", "to": "17:00:00"}
+    assert attrs["next_change"] == HOUSE_NEXT_EVENT
+    assert attrs["following_rooms"] == 3
+    assert attrs["house_reference_temperature"] == 22.3
+    assert set(attrs) == {
+        "enabled",
+        "active",
+        "heat_c",
+        "cool_c",
+        "eco_heat_c",
+        "eco_cool_c",
+        "climate_mode",
+        "override_until",
+        "source",
+        "schedule_entity",
+        "schedule_name",
+        "schedule_block",
+        "next_change",
+        "following_rooms",
+        "house_reference_temperature",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Following-room behavior (#T6)
+# ---------------------------------------------------------------------------
+
+
+def _following_room(**overrides):
+    room = {
+        "area_id": "living_room",
+        "climate_mode": "auto",
+        "follow_house": True,
+        "comfort_heat": 21.0,
+        "comfort_cool": 24.0,
+        "override_heat": None,
+        "override_cool": None,
+        "override_until": None,
+        "override_type": None,
+        "climate_control_enabled": True,
+    }
+    room.update(overrides)
+    return room
+
+
+@pytest.fixture
+def following_setup():
+    coordinator = MagicMock()
+    coordinator.hass = MagicMock()
+    coordinator.hass.config.units.temperature_unit = UnitOfTemperature.CELSIUS
+    coordinator.async_request_refresh = AsyncMock()
+    coordinator.async_turn_room_off = AsyncMock()
+    store = MagicMock()
+    store.async_update_room = AsyncMock()
+    store.get_settings.return_value = {}
+    coordinator.hass.data = {DOMAIN: {"store": store}}
+    coordinator.data = {
+        "rooms": {"living_room": {"current_temp": 20.4}},
+        "house": _live_house(),
+    }
+
+    def make(room=None, house=None):
+        store.get_room.return_value = _following_room() if room is None else room
+        if house is not None:
+            coordinator.data = dict(coordinator.data, house=house)
+        entity = RoomMindRoomClimate(coordinator, "living_room")
+        entity.hass = coordinator.hass
+        return entity
+
+    with patch.object(RoomMindRoomClimate, "async_write_ha_state"):
+        yield make, coordinator, store
+
+
+def test_following_room_reports_house_mode(following_setup):
+    make, *_ = following_setup
+    entity = make(house=_live_house(climate_mode="heat_only"))
+    assert entity.hvac_mode == HVACMode.HEAT
+
+
+def test_following_room_but_inactive_house_uses_own_mode(following_setup):
+    make, *_ = following_setup
+    entity = make(house=_live_house(active=False, enabled=False, climate_mode="heat_only"))
+    assert entity.hvac_mode == HVACMode.HEAT_COOL  # own dormant mode, house inactive
+
+
+def test_independent_room_uses_own_mode_even_with_active_house(following_setup):
+    make, *_ = following_setup
+    entity = make(_following_room(follow_house=False), house=_live_house(climate_mode="cool_only"))
+    assert entity.hvac_mode == HVACMode.HEAT_COOL
+
+
+@pytest.mark.asyncio
+async def test_following_room_mode_change_flips_follow_house(following_setup):
+    make, _, store = following_setup
+    await make().async_set_hvac_mode(HVACMode.COOL)
+    written = store.async_update_room.await_args[0][1]
+    assert written["climate_mode"] == "cool_only"
+    assert written["follow_house"] is False
+    assert written["climate_control_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_independent_room_mode_change_does_not_write_follow_house(following_setup):
+    make, _, store = following_setup
+    await make(_following_room(follow_house=False)).async_set_hvac_mode(HVACMode.HEAT)
+    written = store.async_update_room.await_args[0][1]
+    assert written["climate_mode"] == "heat_only"
+    assert "follow_house" not in written
+
+
+@pytest.mark.asyncio
+async def test_following_room_off_still_turns_room_off(following_setup):
+    make, coordinator, store = following_setup
+    await make().async_set_hvac_mode(HVACMode.OFF)
+    coordinator.async_turn_room_off.assert_awaited_once_with("living_room")
+    store.async_update_room.assert_not_awaited()
+
+
+@pytest.mark.parametrize("follow", [True, False])
+def test_room_follow_house_attribute_reflects_stored_flag(following_setup, follow):
+    make, *_ = following_setup
+    entity = make(_following_room(follow_house=follow))
+    assert entity.extra_state_attributes["follow_house"] is follow

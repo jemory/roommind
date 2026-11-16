@@ -285,6 +285,11 @@ class Harness:
         base_settings = {
             "outdoor_temp_sensor": "sensor.outdoor_temp",
             "central_plant": {"thermostat_entity": THERMOSTAT_ENTITY},
+            # The harness emulates an *upgraded* install, where the house layer
+            # starts inert (store.async_load would otherwise seed it enabled on a
+            # fresh store). A test that exercises the house layer passes its own
+            # ``house`` block through ``settings`` and replaces this default.
+            "house": {"enabled": False},
         }
         base_settings.update(settings or {})
         await self.store.async_save_settings(base_settings)

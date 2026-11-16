@@ -2,16 +2,25 @@
  * One `roommind/rooms/list` poll for every RoomMind card on the page, paused while
  * the page is hidden and stopped when no card is shown.
  */
-import type { HomeAssistant, RoomConfig } from "../types";
+import type { HomeAssistant, HouseLive, RoomConfig } from "../types";
 import { noteServerTime } from "../utils/server-clock";
 
 export interface RoomsFeed {
   rooms: Record<string, RoomConfig>;
   climate_control_active: boolean;
+  /** Live house layer from `roommind/rooms/list`; null on an older backend or before the first poll. */
+  house?: HouseLive | null;
+  /** House reference temperature the whole-home model uses, from `central_plant`. */
+  houseRefTemp?: number | null;
   server_time?: number;
 }
 
 type Listener = (feed: RoomsFeed | null, error: string) => void;
+
+/** Raw `roommind/rooms/list` payload: the feed only keeps the fields cards need. */
+interface RoomsListResult extends RoomsFeed {
+  central_plant?: { house_ref_temp?: number | null } | null;
+}
 
 export const POLL_INTERVAL_MS = 10_000;
 
@@ -47,12 +56,14 @@ export function refreshRooms(fresh = false): Promise<void> {
   if (inflight) return fresh ? inflight.then(() => refreshRooms(true)) : inflight;
   const conn = hass;
   inflight = conn
-    .callWS<RoomsFeed>({ type: "roommind/rooms/list" })
+    .callWS<RoomsListResult>({ type: "roommind/rooms/list" })
     .then((result) => {
       noteServerTime(result.server_time);
       last = {
         rooms: result.rooms ?? {},
         climate_control_active: result.climate_control_active ?? true,
+        house: result.house ?? null,
+        houseRefTemp: result.central_plant?.house_ref_temp ?? null,
       };
       lastError = "";
     })

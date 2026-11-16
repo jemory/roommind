@@ -161,3 +161,24 @@ A room is a **Thermal Zone** as soon as it has its own temperature sensor. Add:
 | House feels damp right after cooling | Wet-Coil Lockout too short or Wet-coil max RH too high; see `binary_sensor.roommind_wet_coil_lockout` |
 | Plant pauses whenever a window opens somewhere | Switch the policy to `pause unless door closed` and configure the Interior Door sensors, or use `exclude room only` |
 | A setpoint changed at the wall is overwritten | Turn on `Follow thermostat setpoint` and set the override duration |
+
+## 13. The House Layer
+
+The house layer is one comfort pair, one eco pair, an optional schedule bound to a `schedule.*` helper, a climate mode, preheat and a price shift, held in global settings under `house`. Following rooms inherit all of it; rooms with their own settings keep them.
+
+The house climate entity is `climate.roommind_house`. Its modes are not the same as the room entity's:
+
+- **`off`** pauses all control (`climate_control_active`). The house layer stays configured, its schedule keeps running in Home Assistant, and nothing is served until the mode is turned back on. This is a pause, not a switch-off of the equipment, and it is not the same as the house layer being disabled.
+- **`heat` / `cool` / `heat_cool`** set the house climate mode that following rooms inherit. A room in Heat only takes part in heating plans only, as with the room entity.
+
+Writing to the entity for the first time enables the house layer on an install that was upgraded from an earlier version; an upgrade starts with the house layer disabled (`enabled=false`) so nothing changes until a house target is set. A fresh install starts enabled at 21/24 °C with 17/27 °C eco.
+
+A target or a preset change on the entity is a temporary hold, the **House Override**: it holds until the next house schedule change, and the preset `none` ("Resume schedule") ends it. A hold outranks the house schedule block but not a room schedule block with temperatures, a presence-away state, a vacation or an override higher up the ladder.
+
+Precedence for a following room, top to bottom:
+
+```
+Room Manual Override > Central Thermostat Override > Vacation > Presence Away > Room schedule block with temperatures > House Override > House schedule block > House Target > the room's comfort/eco band
+```
+
+An empty following room runs on the house eco pair, not the house comfort pair. When no room has a setting of its own, occupancy decides which room gets the house target, and empty rooms stay on their eco/guardrail band.

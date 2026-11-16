@@ -1,9 +1,23 @@
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { repeat } from "lit/directives/repeat.js";
-import type { CentralPlantLive, HomeAssistant, PlantAction, PriceStatus } from "../../types";
+import type {
+  CentralPlantLive,
+  HomeAssistant,
+  HouseLive,
+  PlantAction,
+  PriceStatus,
+} from "../../types";
 import { floorGroups, type AreaInfo } from "../../utils/dashboard";
 import { isControlledZone } from "../../utils/room-state";
+import {
+  followingRoomsLabel,
+  formatHouseTarget,
+  houseHoldLabel,
+  houseModeLabel,
+  houseOverrideActive,
+  houseSourceLabel,
+} from "../../utils/house-state";
 import { localize, type TranslationKey } from "../../utils/localize";
 import { formatTempLocale, tempUnit } from "../../utils/temperature";
 import { VACATION_SENTINEL } from "../../utils/constants";
@@ -64,8 +78,11 @@ export class RsDashboard extends LitElement {
   @property({ attribute: false }) public summary!: HouseSummary;
   /** Live Central Plant status from rooms/list; null until the backend reports it. */
   @property({ attribute: false }) public centralPlant: CentralPlantLive | null = null;
+  /** Live house layer from rooms/list; null until the backend reports it (or on older installs). */
+  @property({ attribute: false }) public house: HouseLive | null = null;
 
   private _clearingOverride = false;
+  private _resumingHouseSchedule = false;
 
   static styles = [
     tokens,
@@ -192,21 +209,106 @@ export class RsDashboard extends LitElement {
           justify-content: flex-start;
         }
       }
+
+      /* Compact house hero: target band, mode, schedule/hold, followers, actions. */
+      .house {
+        margin: 0 0 12px;
+        padding: 12px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .house-head {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+      }
+
+      .house-icon {
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        flex: none;
+        display: grid;
+        place-items: center;
+        background: var(--rs-fill);
+        color: var(--primary-color);
+        --mdc-icon-size: 20px;
+      }
+
+      .house-text {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .house-title {
+        font-size: 14px;
+        font-weight: 500;
+        line-height: 1.3;
+      }
+
+      .house-band {
+        font-size: 18px;
+        font-weight: 500;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .house-sub {
+        font-size: 12px;
+        color: var(--secondary-text-color);
+        line-height: 1.4;
+        overflow-wrap: anywhere;
+      }
+
+      .house-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 14px;
+        align-items: center;
+        font-size: 12px;
+        color: var(--secondary-text-color);
+      }
+
+      .house-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .house-actions ha-button {
+        --mdc-typography-button-font-size: 12px;
+        min-height: 32px;
+      }
+
+      .house-actions .link {
+        background: none;
+        border: none;
+        color: var(--primary-color);
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+        padding: 4px 2px;
+      }
     `,
   ];
 
   render() {
     const l = this.hass.language;
+    const hero = this._renderHouseHero();
     if (this.infos.length === 0) {
-      return html`<div class="placeholder">
-        <ha-icon icon="mdi:home"></ha-icon>
-        <p>${localize("panel.no_areas", l)}<br />${localize("panel.no_areas_hint", l)}</p>
-      </div>`;
+      return html`${hero}
+        <div class="placeholder">
+          <ha-icon icon="mdi:home"></ha-icon>
+          <p>${localize("panel.no_areas", l)}<br />${localize("panel.no_areas_hint", l)}</p>
+        </div>`;
     }
     const hidden = new Set(this.hiddenRooms);
     const visible = this.infos.filter((i) => !hidden.has(i.area.area_id));
     if (visible.length === 0) {
-      return html`${this._renderPlant()}
+      return html`${hero} ${this._renderPlant()}
         <div class="placeholder">
           <ha-icon icon="mdi:eye-off-outline"></ha-icon>
           <p>${localize("panel.all_hidden", l)}</p>
@@ -215,7 +317,7 @@ export class RsDashboard extends LitElement {
     }
     const groups = floorGroups(visible, this.hass, this.groupByFloor);
     return html`
-      ${this._renderPlant()} ${this._renderPills(visible)}
+      ${hero} ${this._renderPlant()} ${this._renderPills(visible)}
       ${groups.map(
         (g) => html`
           ${
@@ -242,6 +344,95 @@ export class RsDashboard extends LitElement {
         `,
       )}
     `;
+  }
+
+  /**
+   * Compact house hero above the room grid. Renders nothing on installs that do not report the
+   * house layer yet, so the dashboard stays unchanged until the backend publishes it.
+   */
+  private _renderHouseHero() {
+    const house = this.house;
+    if (!house) return nothing;
+    const l = this.hass.language;
+    const hold = houseHoldLabel(house, l);
+    const source = houseSourceLabel(house, l);
+    const detail = houseOverrideActive(house) && hold ? hold : source;
+    const block = house.schedule_block;
+    const blockText = block ? `${block.from}–${block.to}` : "";
+    return html`<ha-card class="house">
+      <div class="house-head">
+        <span class="house-icon" aria-hidden="true"
+          ><ha-icon icon="mdi:home-thermometer"></ha-icon
+        ></span>
+        <div class="house-text">
+          <div class="house-title">${localize("house.title", l)}</div>
+          <div class="house-band">${formatHouseTarget(house, this.hass)}</div>
+        </div>
+      </div>
+      <div class="house-meta">
+        <span>${localize("house.mode", l)}: <b>${houseModeLabel(house, l)}</b></span>
+        <span>${detail}${blockText ? ` · ${blockText}` : ""}</span>
+        <span>${followingRoomsLabel(house.following_rooms ?? 0, l)}</span>
+      </div>
+      <div class="house-actions">
+        ${
+          houseOverrideActive(house)
+            ? html`<ha-button
+                .disabled=${this._resumingHouseSchedule}
+                @click=${this._resumeHouseSchedule}
+                >${localize("house.resume_schedule", l)}</ha-button
+              >`
+            : nothing
+        }
+        <button type="button" class="link" @click=${this._openHouseSchedule}>
+          ${localize("panel.tab.schedules", l)}
+        </button>
+        <button type="button" class="link" @click=${this._openHouseSettings}>
+          ${localize("house.title", l)}
+        </button>
+      </div>
+    </ha-card>`;
+  }
+
+  /** Jump to the Schedules tab, reusing the panel's existing schedule navigation event. */
+  private _openHouseSchedule() {
+    this.dispatchEvent(
+      new CustomEvent("open-schedule-editor", {
+        detail: {
+          entityId: this.house?.schedule_entity ?? "",
+          areaId: "",
+          kind: "",
+        },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /** Jump to the House settings category, reusing the dashboard's settings navigation event. */
+  private _openHouseSettings() {
+    this.dispatchEvent(
+      new CustomEvent("open-settings", {
+        detail: { category: "house" },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /** Clear a temporary house hold and let the panel refresh the rooms list. */
+  private async _resumeHouseSchedule() {
+    if (this._resumingHouseSchedule) return;
+    this._resumingHouseSchedule = true;
+    try {
+      await this.hass.callWS({ type: "roommind/house/clear_override" });
+      this.dispatchEvent(new CustomEvent("room-updated", { bubbles: true, composed: true }));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.debug("[RoomMind] clear house override:", err);
+    } finally {
+      this._resumingHouseSchedule = false;
+    }
   }
 
   /** Crisp Central HVAC status card: plant action, temperatures, targets, drivers and guards. */

@@ -6,6 +6,7 @@ import type { TranslationKey } from "../../utils/localize";
  */
 export type SettingsCategoryId =
   | "orphans"
+  | "house"
   | "plant"
   | "general"
   | "vacation"
@@ -46,6 +47,12 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
   {
     label: "settings.group.operation",
     categories: [
+      {
+        id: "house",
+        icon: "mdi:home-thermometer",
+        title: "settings.house_title",
+        intro: "settings.intro.house",
+      },
       {
         id: "plant",
         icon: "mdi:hvac",

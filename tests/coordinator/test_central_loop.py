@@ -25,7 +25,7 @@ async def test_a_cycle_publishes_the_room_and_plant_state(harness: Harness):
 
     data = await harness.cycle()
 
-    assert set(data) == {"rooms", "central_plant"}
+    assert set(data) == {"rooms", "central_plant", "house"}
     assert set(data["rooms"]) == {"living_room"}
     assert coordinator.rooms == data["rooms"]
     assert coordinator.central_plant == data["central_plant"]

@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 from homeassistant.core import Context
 
 DOMAIN = "roommind"
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 
 # Platforms
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BINARY_SENSOR, Platform.CLIMATE]
@@ -51,6 +51,7 @@ TARGET_REASON_OVERRIDE = "override"
 TARGET_REASON_VACATION = "vacation"
 TARGET_REASON_AWAY = "away"
 TARGET_REASON_VACANT = "vacant"
+TARGET_REASON_HOUSE = "house"
 
 # Per room: how far the schedule target may move with the electricity price (0 = off)
 MAX_PRICE_SHIFT_K = 2.0
@@ -263,11 +264,20 @@ DEFAULT_DEHUMIDIFY_RH_THRESHOLD = 60.0
 DEFAULT_MAX_DEHUMIDIFY_OVERCOOL_C = 0.8
 DEFAULT_WET_COIL_LOCKOUT_MINUTES = 25
 DEFAULT_WET_COIL_MAX_RH = 52.0
-# Room Priority weights: an active override outranks occupancy, occupancy
-# outranks the guardrail band that keeps empty rooms from drifting.
+# Room Priority weights: occupancy decides precedence, and a room setting only
+# breaks ties inside one occupancy level, so occupancy still outranks the
+# guardrail band that keeps empty rooms from drifting.
+# DEPRECATED: OVERRIDE_PRIORITY_WEIGHT (a flat 3.0 that beat every occupancy
+# level) no longer participates in room-priority arbitration; it stays defined
+# so older imports keep working.
 OVERRIDE_PRIORITY_WEIGHT = 3.0
 AWAY_PRIORITY_WEIGHT = 0.25
 GUARDRAIL_PRIORITY_WEIGHT = 0.08
+# Tie-break bumps added to the occupancy-derived weight of a room that carries a
+# setting of its own: a manual override edges out a room schedule at equal
+# occupancy, and both stay inside the occupancy-derived ordering.
+ROOM_SETTING_TIE_WEIGHT = 0.02
+MANUAL_OVERRIDE_TIE_WEIGHT = 0.05
 # Never let the plant idle below this: freeze protection outranks energy.
 FREEZE_PROTECTION_TEMP_C = 7.0
 # Share of a conditioning run's energy that the blower alone accounts for.
@@ -326,6 +336,62 @@ def is_plant_override_active(settings: dict) -> bool:
         override_until = source.get("plant_override_until")
         return override_until is None or time.time() < override_until
     return False
+
+
+DEFAULT_HOUSE_SETTINGS: dict[str, object] = {
+    "enabled": False,
+    "heat_c": None,
+    "cool_c": None,
+    "eco_heat_c": DEFAULT_ECO_HEAT,
+    "eco_cool_c": DEFAULT_ECO_COOL,
+    "climate_mode": CLIMATE_MODE_AUTO,
+    "schedules": [],
+    "schedule_selector_entity": "",
+    "preheat_enabled": True,
+    "price_shift": 0.0,
+    "override_heat": None,
+    "override_cool": None,
+    "override_until": None,
+    "override_type": None,
+}
+
+
+def get_house_settings(settings: dict) -> dict:
+    """Return the house settings with every unspecified key defaulted.
+
+    Always a fresh dict: callers may mutate the result without touching either
+    the global settings or the module-level defaults.
+    """
+    merged = dict(DEFAULT_HOUSE_SETTINGS)
+    schedules = DEFAULT_HOUSE_SETTINGS["schedules"]
+    if isinstance(schedules, list):
+        merged["schedules"] = list(schedules)
+    house = settings.get("house")
+    if isinstance(house, dict):
+        merged.update(house)
+    return merged
+
+
+def is_house_active(settings_or_house: dict) -> bool:
+    """Return True when the house settings block is enabled with at least one target.
+
+    Accepts either the full global settings dict or an already resolved house
+    settings dict, so callers need not unwrap ``house`` first.
+    """
+    house = settings_or_house.get("house")
+    block = house if isinstance(house, dict) else settings_or_house
+    if not block.get("enabled"):
+        return False
+    return block.get("heat_c") is not None or block.get("cool_c") is not None
+
+
+def fresh_house_settings() -> dict:
+    """Return the house settings a fresh install seeds: enabled at comfort targets."""
+    # Build through get_house_settings so the mutable ``schedules`` default is
+    # copied too; a plain ``{**DEFAULT_HOUSE_SETTINGS}`` would share the list.
+    house = get_house_settings({})
+    house.update({"enabled": True, "heat_c": DEFAULT_COMFORT_HEAT, "cool_c": DEFAULT_COMFORT_COOL})
+    return house
 
 
 def build_override_live(room: dict, suppressed: bool = False) -> dict:

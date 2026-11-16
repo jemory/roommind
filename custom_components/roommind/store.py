@@ -23,12 +23,14 @@ from .const import (
     OCCUPANCY_MODE_FOLLOW_SCHEDULE,
     OCCUPANCY_MODE_REACTIVE_TREND,
     OCCUPANCY_MODE_SCHEDULE_ASSUMED,
+    fresh_house_settings,
     get_central_plant_settings,
+    get_house_settings,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-STORAGE_VERSION = 2
+STORAGE_VERSION = 3
 STORAGE_KEY = DOMAIN
 
 # v1 global settings the Central HVAC schema retired: they moved into the
@@ -170,6 +172,7 @@ def _apply_room_defaults(room: dict) -> None:
     room.setdefault("door_closed_mix_factor", DEFAULT_DOOR_CLOSED_MIX_FACTOR)
     room.setdefault("occupancy_dwell_minutes", DEFAULT_OCCUPANCY_DWELL_MINUTES)
     room.setdefault("read_only_covers", [])
+    room.setdefault("follow_house", True)
 
 
 def strip_retired_room_keys(room: dict) -> dict:
@@ -240,7 +243,7 @@ def _promote_shared_thermostat(rooms: dict, settings: dict) -> None:
 
 
 def migrate_store_data(raw: dict) -> dict:
-    """Migrate stored data to the current schema (v1 -> v2). Idempotent.
+    """Migrate stored data to the current schema (v1 -> v3). Idempotent.
 
     Returns a fresh dict and never mutates ``raw``, so the caller can compare
     both to decide whether a migration save is needed.
@@ -259,6 +262,7 @@ def migrate_store_data(raw: dict) -> dict:
             _migrate_room(room)
 
     settings["central_plant"] = get_central_plant_settings(settings)
+    settings["house"] = get_house_settings(settings)
     data["rooms"] = rooms
     data["settings"] = settings
     if not isinstance(data.get("thermal_data"), dict):
@@ -304,7 +308,10 @@ class RoomMindStore:
         stored = await self._store.async_load()
         if not stored:
             self._data = {}
-            self._settings = {}
+            # Fresh install: the house settings block starts enabled at the
+            # comfort targets, so whole-home control is live from the first
+            # coordinator cycle. Everything else starts empty.
+            self._settings = {"house": fresh_house_settings()}
             self._thermal_data = {}
             self._occupancy_trends = {}
             return
@@ -360,6 +367,9 @@ class RoomMindStore:
         central = updates.get("central_plant")
         if isinstance(central, dict):
             updates["central_plant"] = {**get_central_plant_settings(self._settings), **central}
+        house = updates.get("house")
+        if isinstance(house, dict):
+            updates["house"] = {**get_house_settings(self._settings), **house}
         self._settings.update(updates)
         await self._async_save()
         return dict(self._settings)
@@ -493,6 +503,7 @@ class RoomMindStore:
             "voc_sensor": config.get("voc_sensor", ""),
             "voc_threshold": config.get("voc_threshold"),
             "ventilation_entity": config.get("ventilation_entity", ""),
+            "follow_house": config.get("follow_house", True),
         }
         _single_temps_to_cool_side(room, config, room["climate_mode"])
         _sync_window_sensors(room, config)
