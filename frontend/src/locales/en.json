@@ -1246,5 +1246,14 @@
   "house.error.band_order": "Cooling must stay above heating.",
   "house.error.eco_band_order": "Eco cooling must not be below eco heating.",
   "house.error.temp_range": "A temperature is outside the allowed range.",
-  "house.error.price_range": "The price shift must be between 0 and 2 K."
+  "house.error.price_range": "The price shift must be between 0 and 2 K.",
+  "room.section.solar": "Solar orientation",
+  "room.section.connections": "Room connections",
+  "solar.hint": "With an orientation set, the model uses the sun actually striking that facade instead of a horizontal-plane estimate. Leave empty to keep the current behaviour.",
+  "solar.copy_from_blinds": "Copy from blinds",
+  "connections.no_other_rooms": "No other rooms in the house yet.",
+  "connections.neighbour_title": "Rooms connected by a doorway",
+  "connections.neighbour_hint": "A doorway is a normal air path between rooms. Leave empty to keep today's whole-house behaviour.",
+  "connections.open_title": "Rooms in the same open space",
+  "connections.open_hint": "An open-concept connection dominates the room's air exchange. Leave empty to keep today's whole-house behaviour."
 }

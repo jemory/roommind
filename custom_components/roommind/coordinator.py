@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
 from functools import partial
@@ -82,9 +83,15 @@ from .control.central_mpc import (
     is_room_mpc_ready,
 )
 from .control.rebound import ForcedAirReboundTracker
-from .control.solar import build_solar_series, compute_q_solar_norm
-from .control.thermal_model import RoomModelManager
+from .control.solar import (
+    build_oriented_solar_series,
+    build_solar_series,
+    compute_q_solar_norm,
+    plane_of_array_irradiance,
+)
+from .control.thermal_model import RoomModelManager, regressor_signature
 from .control.thermostat_actuator import ActuationResult, ThermostatActuator
+from .control.topology import RoomGraph, build_room_graph, reference_temperature, reference_weights
 from .managers.air_quality_manager import AirQualityTracker, VentilationController
 from .managers.central_plant_manager import CentralPlantManager, ExteriorGateResult, PlantGuardState
 from .managers.cover_manager import CoverManager
@@ -104,6 +111,7 @@ from .utils.history_store import HistoryStore
 from .utils.humidity_utils import effective_temperature_c
 from .utils.presence_utils import is_presence_away
 from .utils.price_utils import PriceSignal
+from .utils.room_utils import room_solar_azimuths
 from .utils.schedule_utils import (
     HouseContext,
     TargetSource,
@@ -297,6 +305,9 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         self._history_write_count: int = 0
         self._history_rotate_count: int = 0
         self._current_q_solar: float = 0.0
+        # Per-room oriented solar gain (normalised W/m2 / 1000), keyed by area_id.
+        # Rooms without exterior-glazing azimuths keep ``self._current_q_solar``.
+        self._current_q_solar_by_room: dict[str, float] = {}
         # Inputs the model learned from this cycle, recorded for the analytics backtest.
         self._model_inputs: dict[str, dict[str, float | None]] = {}
         # Live per-room display/mode history for diagnostics and the old REST surface.
@@ -355,7 +366,10 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         outdoor_forecast = await self._weather_manager.async_read_forecast(settings)
         cloud_series = WeatherManager.extract_cloud_series(outdoor_forecast)
         self._cover_orchestrator.set_cloud_series(cloud_series)
-        self._current_q_solar = self._read_current_q_solar(settings)
+        # One cloud-coverage read per cycle, shared by the house-wide and the
+        # per-room solar estimates so every room uses the same weather snapshot.
+        cloud_coverage = self._read_cloud_coverage(settings)
+        self._current_q_solar = self._read_current_q_solar(settings, cloud_coverage, cloud_coverage_known=True)
         await self._price_manager.async_update(settings, self._async_load_price_history)
         self._load_learned_state(store, settings)
 
@@ -397,6 +411,12 @@ class RoomMindCoordinator(DataUpdateCoordinator):
 
         # -- 6. House Reference Temperature -----------------------------------
         house_ref_temp = self._house_ref_temp(cycles, thermostat_temp_c, plant_settings)
+        # Per-room solar and topology inputs are built once per cycle from the
+        # same weather snapshot and room set, then shared by the MPC and training.
+        self._refresh_room_q_solar(cycles, cloud_coverage)
+        graph = self._build_room_graph(cycles)
+        included = self._house_ref_included_area_ids(cycles)
+        temperatures = {cycle.area_id: cycle.current_temp for cycle in cycles if cycle.current_temp is not None}
 
         # -- 7. Plant guards, wet-coil lockout and the exterior-opening gate ---
         observed_action, fan_circulating = self._plant_manager.observe_plant_action(
@@ -443,6 +463,8 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             house,
             house_ctx,
             house_active,
+            graph=graph,
+            included=included,
         )
         commanded_action = plan.current_action()
         if not thermostat_entity or not settings.get("climate_control_active", True) or startup_waiting:
@@ -479,7 +501,17 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         # -- 10. Train the room models and persist what was learned -----------
         ekf_mode = observed_action if thermostat_entity else MODE_IDLE
         room_states = self._build_room_states(cycles, settings, plan, display_action, startup_waiting, fan_circulating)
-        self._train_and_record(cycles, room_states, settings, house_ref_temp, ekf_mode, dt_minutes)
+        self._train_and_record(
+            cycles,
+            room_states,
+            settings,
+            house_ref_temp,
+            ekf_mode,
+            dt_minutes,
+            graph=graph,
+            temperatures=temperatures,
+            included=included,
+        )
         await self._async_reconcile_ventilation(settings, room_states)
         await self._async_record_recent_temps(room_states)
         await self._async_write_history(cycles, plan, room_states, settings, now)
@@ -667,8 +699,8 @@ class RoomMindCoordinator(DataUpdateCoordinator):
 
         return None, "none"
 
-    def _read_current_q_solar(self, settings: dict) -> float:
-        """Normalized clear-sky-adjusted solar irradiance of the current cycle."""
+    def _read_cloud_coverage(self, settings: dict) -> float | None:
+        """Read the weather entity's cloud coverage once, in percent (None when unavailable)."""
         cloud_coverage = None
         weather_entity = settings.get("weather_entity")
         if weather_entity:
@@ -677,12 +709,65 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                 coverage = state.attributes.get("cloud_coverage")
                 if isinstance(coverage, int | float) and not isinstance(coverage, bool):
                     cloud_coverage = float(coverage)
+        return cloud_coverage
+
+    def _read_current_q_solar(
+        self,
+        settings: dict,
+        cloud_coverage: float | None = None,
+        *,
+        cloud_coverage_known: bool = False,
+    ) -> float:
+        """Normalized clear-sky-adjusted solar irradiance of the current cycle.
+
+        The control loop reads the weather entity once and passes the value in
+        (``cloud_coverage_known=True``) so the per-room pass can reuse it. Callers
+        that invoke this helper directly keep the original behaviour.
+        """
+        if not cloud_coverage_known:
+            cloud_coverage = self._read_cloud_coverage(settings)
         return compute_q_solar_norm(
             self.hass.config.latitude,
             self.hass.config.longitude,
             time.time(),
             cloud_coverage,
         )
+
+    def _refresh_room_q_solar(self, cycles: list[_RoomCycle], cloud_coverage: float | None) -> None:
+        """Compute every room's oriented solar gain from one timestamp and one weather read.
+
+        A room with no exterior glazing azimuths keeps ``self._current_q_solar``,
+        the unoriented horizontal-plane value every room received before the
+        feature existed. Oriented rooms receive the mean plane-of-array
+        irradiance over their azimuths, normalised the same way (W/m2 / 1000).
+        """
+        ts = time.time()
+        latitude = self.hass.config.latitude
+        longitude = self.hass.config.longitude
+        result: dict[str, float] = {}
+        for cycle in cycles:
+            if cycle.is_outdoor:
+                continue
+            azimuths = room_solar_azimuths(cycle.room)
+            if not azimuths:
+                result[cycle.area_id] = self._current_q_solar
+                continue
+            poa_total = sum(
+                plane_of_array_irradiance(
+                    latitude,
+                    longitude,
+                    ts,
+                    azimuth,
+                    cloud_coverage=cloud_coverage,
+                )
+                for azimuth in azimuths
+            )
+            result[cycle.area_id] = poa_total / len(azimuths) / 1000.0
+        self._current_q_solar_by_room = result
+
+    def _room_q_solar(self, cycle: _RoomCycle) -> float:
+        """This room's solar gain regressor, falling back to the house-wide value."""
+        return self._current_q_solar_by_room.get(cycle.area_id, self._current_q_solar)
 
     def _update_outdoor_unavailable_notification(self, settings: dict) -> None:
         """Raise/clear the single notification when no outdoor temperature arrives."""
@@ -1138,6 +1223,41 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         own_temp.append(thermostat_temp_c)
         return sum(own_temp) / len(own_temp)
 
+    @staticmethod
+    def _build_room_graph(cycles: list[_RoomCycle]) -> RoomGraph:
+        """Adjacency graph of the conditioned rooms; outdoor areas are never neighbours."""
+        rooms = {cycle.area_id: cycle.room for cycle in cycles if not cycle.is_outdoor}
+        return build_room_graph(rooms)
+
+    @staticmethod
+    def _house_ref_included_area_ids(cycles: list[_RoomCycle]) -> set[str]:
+        """Rooms contributing to the house mean: indoor, closed window, with a reading.
+
+        This is the area-id form of the filter in :meth:`_house_ref_temp`, kept in
+        one place so training and the MPC use exactly the same include set.
+        """
+        return {
+            cycle.area_id
+            for cycle in cycles
+            if not cycle.is_outdoor and not cycle.window_open and cycle.current_temp is not None
+        }
+
+    @staticmethod
+    def _room_ref_temp(
+        cycle: _RoomCycle,
+        graph: RoomGraph,
+        temperatures: Mapping[str, float],
+        included: Collection[str],
+        fallback: float | None,
+    ) -> float | None:
+        """Neighbour-weighted local reference for a room; *fallback* when it has none."""
+        weights = reference_weights(graph, cycle.area_id, included)
+        if not weights or fallback is None:
+            # No declared neighbours, or no usable house reading to fall back on:
+            # the caller records the reference as unknown rather than inventing one.
+            return fallback
+        return reference_temperature(weights, temperatures, fallback)
+
     def _step_wet_coil(
         self,
         cycles: list[_RoomCycle],
@@ -1238,14 +1358,27 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         house: dict,
         house_ctx: HouseContext | None,
         house_active: bool,
+        *,
+        graph: RoomGraph | None = None,
+        included: Collection[str] | None = None,
     ) -> CentralMPCPlan:
-        """Build the room horizon inputs and hand the whole home to the joint MPC."""
+        """Build the room horizon inputs and hand the whole home to the joint MPC.
+
+        ``graph``/``included`` are the per-cycle topology inputs, threaded in from
+        the same pass that trains the EKFs. When omitted (direct callers) an empty
+        graph keeps every room's reference at the house mean, as before.
+        """
+        empty_graph = build_room_graph({})
+        topology = graph if graph is not None else empty_graph
+        include_set: Collection[str] = included if included is not None else ()
         n_blocks = MIN_HORIZON_BLOCKS
         can_heat = climate_mode != CLIMATE_MODE_COOL_ONLY
         can_cool = climate_mode != CLIMATE_MODE_HEAT_ONLY
         step_seconds = PLAN_DT_MINUTES * 60.0
         inputs: list[RoomHorizonInput] = []
         estimators: dict[str, Any] = {}
+        solar_by_azimuths: dict[tuple[int, ...], list[float]] = {}
+        house_solar: list[float] | None = None
         for cycle in cycles:
             if not cycle.controllable or cycle.current_temp is None:
                 continue
@@ -1277,14 +1410,33 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                 comfort_heat = [None] * n_blocks
             elif effective_mode == CLIMATE_MODE_HEAT_ONLY:
                 comfort_cool = [None] * n_blocks
-            solar = build_solar_series(
-                self.hass.config.latitude,
-                self.hass.config.longitude,
-                n_blocks,
-                PLAN_DT_MINUTES,
-                start_ts=now,
-                cloud_series=cloud_series,
-            )
+            # Memoise by azimuth tuple: ten south-facing rooms share one series.
+            # The unoriented GHI series is also computed once when any room needs it.
+            azimuths = room_solar_azimuths(room)
+            if azimuths:
+                solar = solar_by_azimuths.get(azimuths)
+                if solar is None:
+                    solar = build_oriented_solar_series(
+                        self.hass.config.latitude,
+                        self.hass.config.longitude,
+                        n_blocks,
+                        list(azimuths),
+                        PLAN_DT_MINUTES,
+                        start_ts=now,
+                        cloud_series=cloud_series,
+                    )
+                    solar_by_azimuths[azimuths] = solar
+            else:
+                if house_solar is None:
+                    house_solar = build_solar_series(
+                        self.hass.config.latitude,
+                        self.hass.config.longitude,
+                        n_blocks,
+                        PLAN_DT_MINUTES,
+                        start_ts=now,
+                        cloud_series=cloud_series,
+                    )
+                solar = house_solar
             inputs.append(
                 RoomHorizonInput(
                     area_id=cycle.area_id,
@@ -1304,6 +1456,8 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                     occupancy_gain_series=[cycle.occupancy.effective_occupancy] * n_blocks,
                     preheat_enabled=bool(room.get("preheat_enabled", True)),
                     include_in_house_mean=not cycle.window_open,
+                    neighbours=reference_weights(topology, cycle.area_id, include_set),
+                    mixing_group=topology.mixing_group.get(cycle.area_id),
                     mpc_ready=is_room_mpc_ready(estimator, room_can_heat, room_can_cool),
                 )
             )
@@ -1519,12 +1673,26 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         house_ref_temp: float | None,
         ekf_mode: str | None,
         dt_minutes: float,
+        *,
+        graph: RoomGraph | None = None,
+        temperatures: Mapping[str, float] | None = None,
+        included: Collection[str] | None = None,
     ) -> None:
         """Step the forced-air charge, train each room's EKF and track the display modes."""
+        topology = graph if graph is not None else build_room_graph({})
+        temp_map: Mapping[str, float] = temperatures if temperatures is not None else {}
+        include_set: Collection[str] = included if included is not None else ()
         learning_disabled = set(settings.get("learning_disabled_rooms", []))
         for cycle in cycles:
             if cycle.is_outdoor:
                 continue
+            # Configuration changes take effect on the first cycle after save,
+            # even while the room is not trainable. get_estimator creates it.
+            azimuths = room_solar_azimuths(cycle.room)
+            local_reference = bool(reference_weights(topology, cycle.area_id, include_set))
+            self._model_manager.get_estimator(cycle.area_id).apply_regressor_signature(
+                regressor_signature(azimuths, local_reference)
+            )
             mean_charge, _ = self._rebound_tracker.step(cycle.area_id, ekf_mode, dt_minutes)
             display_mode = room_states.get(cycle.area_id, {}).get("mode", MODE_IDLE)
             self._note_room_mode(cycle.area_id, display_mode)
@@ -1534,6 +1702,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                 self._model_inputs.pop(cycle.area_id, None)
                 self._ekf_training.clear(cycle.area_id)
                 continue
+            room_ref_temp = self._room_ref_temp(cycle, topology, temp_map, include_set, house_ref_temp)
             self._ekf_training.process(
                 area_id=cycle.area_id,
                 current_temp=current_temp,
@@ -1544,17 +1713,17 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                 raw_open=cycle.raw_open or cycle.window_pending,
                 q_residual=0.0,
                 shading_factor=cycle.shading_factor,
-                q_solar=self._current_q_solar,
+                q_solar=self._room_q_solar(cycle),
                 can_heat=cycle.room.get("climate_mode", "auto") != CLIMATE_MODE_COOL_ONLY,
                 can_cool=cycle.room.get("climate_mode", "auto") != CLIMATE_MODE_HEAT_ONLY,
                 dt_minutes=dt_minutes,
                 q_occupancy=cycle.occupancy.effective_occupancy,
                 q_rebound=mean_charge,
-                T_house=house_ref_temp,
+                T_house=room_ref_temp,
                 door_mix_factor=cycle.door.mix_factor if cycle.door else 1.0,
                 door_supply_factor=cycle.door.supply_factor if cycle.door else 1.0,
             )
-            self._model_inputs[cycle.area_id] = self._model_input_row(cycle, ekf_mode, house_ref_temp)
+            self._model_inputs[cycle.area_id] = self._model_input_row(cycle, ekf_mode, room_ref_temp)
             # Attach the training inputs to the live state for analytics/diagnostics.
             state = room_states.get(cycle.area_id)
             if state is not None:
@@ -1582,7 +1751,9 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             power = 0.0
         return {
             "model_power": round(power, 3),
-            "model_solar": round(self._current_q_solar * cycle.shading_factor, 3),
+            # The backtest replays the oriented per-room regressor the EKF trained
+            # on, including the shading factor (applied here, as in training).
+            "model_solar": round(self._room_q_solar(cycle) * cycle.shading_factor, 3),
             "model_occupancy": round(cycle.occupancy.effective_occupancy, 3),
             # No house reference means "unknown", never a 0 °C house sink: the history
             # store writes "" and the backtest then falls back to the 1R1C model.

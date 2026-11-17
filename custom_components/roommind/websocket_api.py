@@ -39,7 +39,7 @@ from .services.analytics_service import (
     _safe_float,  # noqa: F401 - re-exported for tests
     build_analytics_data,
 )
-from .utils.area_utils import REST_SWITCHED_OFF, rooms_with_area, rooms_without_area
+from .utils.area_utils import REST_SWITCHED_OFF, _known_area_ids, rooms_with_area, rooms_without_area
 from .utils.schedule_utils import mask_override_band, next_schedule_change, override_preset_band
 
 if TYPE_CHECKING:
@@ -102,6 +102,9 @@ _ROOM_SAVE_FIELDS = (
     "covers_snap_deploy",
     "covers_window_hold",
     "cover_min_positions",
+    "solar_azimuths",
+    "neighbour_rooms",
+    "open_rooms",
     "ignore_presence",
     "is_outdoor",
     "climate_control_enabled",
@@ -213,6 +216,30 @@ def _validate_no_own_entities(config: dict, own_prefix: str) -> str | None:
         if eid and eid.split(".", 1)[-1].startswith(own_prefix):
             return f"Cannot assign RoomMind's own entity '{eid}' to a room"
     return None
+
+
+def _validate_room_references(hass: HomeAssistant, area_id: str, config: dict) -> None:
+    """Validate a room's connectivity lists against itself and the area registry.
+
+    Only keys present in ``config`` are checked so a partial save does not
+    re-validate untouched fields. ``solar_azimuths`` needs no check here: the
+    websocket schema already enforces the 0..359 range.
+    """
+    known = _known_area_ids(hass)
+    for field in ("neighbour_rooms", "open_rooms"):
+        if field not in config:
+            continue
+        value = config[field] or []
+        seen: set[str] = set()
+        for referenced in value:
+            if referenced == area_id:
+                raise vol.Invalid(f"{field} must not list the room itself ('{area_id}')")
+            if referenced in seen:
+                raise vol.Invalid(f"{field} must not contain duplicate entries ('{referenced}')")
+            seen.add(referenced)
+            # No area registry (tests / early startup): skip the known-area check.
+            if known is not None and referenced not in known:
+                raise vol.Invalid(f"{field} references unknown area_id '{referenced}'")
 
 
 def _read_only_cover_entity(value: object) -> str:
@@ -551,6 +578,9 @@ async def websocket_list_rooms(
         ],
         vol.Optional("cover_schedule_selector_entity"): str,
         vol.Optional("cover_orientations"): {str: vol.All(vol.Coerce(int), vol.Range(min=0, max=359))},
+        vol.Optional("solar_azimuths"): [vol.All(vol.Coerce(int), vol.Range(min=0, max=359))],
+        vol.Optional("neighbour_rooms"): [str],
+        vol.Optional("open_rooms"): [str],
         vol.Optional("covers_night_close"): bool,
         vol.Optional("covers_night_close_elevation"): vol.All(vol.Coerce(float), vol.Range(min=-18, max=10)),
         vol.Optional("covers_night_close_offset_minutes"): vol.All(vol.Coerce(int), vol.Range(min=-120, max=120)),
@@ -601,6 +631,13 @@ async def websocket_save_room(
     err = _validate_no_own_entities(config, own_prefix)
     if err:
         connection.send_error(msg["id"], "invalid_entity", err)
+        return
+
+    # Connectivity lists must not point at this room, repeat an area or name an unknown area
+    try:
+        _validate_room_references(hass, area_id, config)
+    except vol.Invalid as exc:
+        connection.send_error(msg["id"], "invalid_room_references", str(exc))
         return
 
     room = await store.async_save_room(area_id, config)

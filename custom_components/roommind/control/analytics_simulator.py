@@ -20,6 +20,7 @@ the ``PLAN_DT_MINUTES`` grid the analytics service uses.
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 
 from ..const import (
@@ -105,16 +106,19 @@ def build_forecast_solar_series(
     forecast: list[dict],
     n_blocks: int,
     shading_factor: float = 1.0,
+    azimuths: Sequence[int] | None = None,
 ) -> list[float] | None:
     """Build the solar gain series for the analytics prediction.
 
     Expands hourly ``cloud_coverage`` entries to ``60 // PLAN_DT_MINUTES`` blocks
     before passing them to the solar module, matching the control path's series.
+    Non-empty *azimuths* selects the mean plane-of-array series over the room's
+    glazing; omitted or empty azimuths keep the horizontal-GHI path exactly.
     Returns None when the home has no coordinates.
     """
     if latitude == 0.0 and longitude == 0.0:
         return None
-    from .solar import build_solar_series
+    from .solar import build_oriented_solar_series, build_solar_series
 
     cloud_series: list[float | None] | None = None
     if forecast:
@@ -127,7 +131,17 @@ def build_forecast_solar_series(
         while len(cloud_series) < n_blocks:
             cloud_series.append(cloud_series[-1] if cloud_series else None)
 
-    series = build_solar_series(latitude, longitude, n_blocks, PLAN_DT_MINUTES, cloud_series=cloud_series)
+    if azimuths:
+        series = build_oriented_solar_series(
+            latitude,
+            longitude,
+            n_blocks,
+            list(azimuths),
+            PLAN_DT_MINUTES,
+            cloud_series=cloud_series,
+        )
+    else:
+        series = build_solar_series(latitude, longitude, n_blocks, PLAN_DT_MINUTES, cloud_series=cloud_series)
     if shading_factor != 1.0:
         series = [value * shading_factor for value in series]
     return series

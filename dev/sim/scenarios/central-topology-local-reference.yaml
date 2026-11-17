@@ -1,0 +1,125 @@
+name: central-topology-local-reference
+description: >
+  Cold February week near Chicago on one Central Plant, three heated rooms with a
+  deliberately uneven air graph: the kitchen is open to the living_room through a wide
+  opening, the bedroom sits behind a normally closed door off the living_room, and there
+  is no air path between kitchen and bedroom at all. A whole-house mean therefore drags
+  each room toward a room it never exchanges air with, and pulls hardest on the small
+  kitchen, whose only real neighbour is the large living_room. The rooms declare their
+  connections, so each model is fitted against the weighted mean of the rooms it actually
+  touches instead of the mean of all three.
+
+  This scenario is its own A/B baseline. Run it twice and diff the metrics:
+
+      dev/sim/bin/sim run central-topology-local-reference
+      dev/sim/bin/sim run central-topology-local-reference \
+          --set 'roommind.rooms.kitchen.open_rooms=[]' \
+          --set 'roommind.rooms.bedroom.neighbour_rooms=[]' \
+          --set 'roommind.rooms.living_room.open_rooms=[]' \
+          --set 'roommind.rooms.living_room.neighbour_rooms=[]'
+      dev/sim/bin/sim compare <connected-run> <baseline-run>
+
+  The connected run must show a lower `prediction_mae_30m` in the two coupled rooms. The
+  expectations below assert only what must hold either way; the improvement is read from
+  the comparison rather than pinned to a number that would drift with the weather seed.
+tags: [model, topology, central-plant]
+start: 2026-02-09T00:00
+duration: 3d
+location: {latitude: 41.88, longitude: -87.63, time_zone: America/Chicago, unit_system: us_customary, country: US}
+weather: {profile: winter-cold, fixed: {cloud: 60}}
+house:
+  building: us_wood_frame
+  floors: {ground: Ground floor, upper: Upstairs}
+  outdoor: {sensors: {temperature: sensor.outdoor_temp}}
+  rooms:
+    living_room:
+      name: Living room
+      floor: ground
+      floor_area_m2: 34
+      exterior_wall_m2: 20
+      initial: {temperature: 20.0}
+      windows: [{orientation: S, area_m2: 6, g_value: 0.6}]
+      # Open plan to the kitchen, and the bedroom's only door opens off it.
+      neighbors: {kitchen: open_door, bedroom: closed_door}
+      devices:
+        - {entity_id: climate.central_hvac, profile: central_furnace_hp, heat_capacity_w: 8000, supply_shares: {living_room: 0.5, kitchen: 0.3, bedroom: 0.2}}
+      sensors:
+        temperature: {entity_id: sensor.living_room_temp}
+        occupancy: {entity_id: binary_sensor.living_room_presence}
+    kitchen:
+      name: Kitchen
+      floor: ground
+      floor_area_m2: 14
+      exterior_wall_m2: 9
+      initial: {temperature: 19.0}
+      windows: [{orientation: E, area_m2: 2, g_value: 0.6}]
+      # Only neighbour: the living room, through the shared opening.
+      neighbors: {living_room: open_door}
+      sensors:
+        temperature: {entity_id: sensor.kitchen_temp}
+        occupancy: {entity_id: binary_sensor.kitchen_presence}
+    bedroom:
+      name: Bedroom
+      floor: upper
+      floor_area_m2: 12
+      exterior_wall_m2: 8
+      initial: {temperature: 18.0}
+      windows: [{orientation: N, area_m2: 1.5, g_value: 0.6}]
+      # Behind a closed door: coupled to the living room, and to nothing else.
+      neighbors: {living_room: closed_door}
+      sensors:
+        temperature: {entity_id: sensor.bedroom_temp}
+        occupancy: {entity_id: binary_sensor.bedroom_presence}
+people:
+  - id: robin
+    plan:
+      presence: {weekday: ["home@00:00"], weekend: ["home@00:00"]}
+      rooms: {bedroom: "23:00-07:00", living: "default"}
+    rooms: {bedroom: bedroom, living: living_room}
+roommind:
+  settings:
+    outdoor_temp_sensor: sensor.outdoor_temp
+    weather_entity: weather.simhome
+    central_plant:
+      thermostat_entity: climate.central_hvac
+      nudge_delta_c: 1.5
+      max_nudge_headroom_c: 3.0
+      fallback_heat_c: 16.5
+      fallback_cool_c: 27.0
+      min_deadband_c: 2.5
+      min_run_minutes: 15
+      min_off_minutes: 5
+      exterior_open_policy: pause_unless_door_closed
+  rooms:
+    living_room:
+      temperature_sensor: sensor.living_room_temp
+      occupancy_sensors: [binary_sensor.living_room_presence]
+      climate_mode: heat_only
+      comfort_heat: 21.0
+      eco_heat: 17.0
+      # The feature under test: the air graph this house actually has.
+      open_rooms: [kitchen]
+      neighbour_rooms: [bedroom]
+    kitchen:
+      temperature_sensor: sensor.kitchen_temp
+      occupancy_sensors: [binary_sensor.kitchen_presence]
+      climate_mode: heat_only
+      comfort_heat: 20.0
+      eco_heat: 17.0
+      open_rooms: [living_room]
+    bedroom:
+      temperature_sensor: sensor.bedroom_temp
+      occupancy_sensors: [binary_sensor.bedroom_presence]
+      climate_mode: heat_only
+      comfort_heat: 19.5
+      eco_heat: 16.0
+      neighbour_rooms: [living_room]
+expect:
+  - {invariant: no_rejected_commands}
+  - {invariant: setpoints_within_device_range}
+  - {invariant: target_never_empty}
+  # Every room must have trained: the local reference only exists once the filters run.
+  - {metric: model.n_updates, room: kitchen, min: 100, label: kitchen model trained}
+  - {metric: model.n_updates, room: bedroom, min: 100, label: bedroom model trained}
+  # A declared graph must not degrade comfort: the living room is the one that is driven.
+  - {metric: comfort.undershoot_kh, room: living_room, max: 15, label: occupied living room kept warm}

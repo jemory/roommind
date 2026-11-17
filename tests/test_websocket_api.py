@@ -2199,6 +2199,97 @@ async def test_save_room_allows_normal_entities(ws_hass, store, connection):
 
 
 # ---------------------------------------------------------------------------
+# Thermal-model connectivity keys: save, schema and reference validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_save_room_persists_the_connectivity_keys(ws_hass, store, connection):
+    """rooms/save copies all three new keys into config and stores them."""
+    await store.async_load()
+    msg = {
+        "id": 2,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room",
+        "solar_azimuths": [90, 180],
+        "neighbour_rooms": ["hallway", "kitchen"],
+        "open_rooms": ["dining"],
+    }
+    with patch(
+        "custom_components.roommind.websocket_api._known_area_ids",
+        return_value={"living_room", "hallway", "kitchen", "dining"},
+    ):
+        await _save_room(ws_hass, connection, msg)
+
+    connection.send_error.assert_not_called()
+    room = connection.send_result.call_args[0][1]["room"]
+    assert room["solar_azimuths"] == [90, 180]
+    assert room["neighbour_rooms"] == ["hallway", "kitchen"]
+    assert room["open_rooms"] == ["dining"]
+
+
+def test_save_room_solar_azimuths_schema_range():
+    """solar_azimuths must be compass degrees 0..359, like cover_orientations."""
+    import voluptuous as vol
+
+    schema = websocket_save_room._ws_schema
+    base = {"type": "roommind/rooms/save", "id": 1, "area_id": "a"}
+    assert schema({**base, "solar_azimuths": ["90", 0, 359]})["solar_azimuths"] == [90, 0, 359]
+    with pytest.raises(vol.Invalid):
+        schema({**base, "solar_azimuths": [360]})
+    with pytest.raises(vol.Invalid):
+        schema({**base, "solar_azimuths": [-1]})
+    with pytest.raises(vol.Invalid):
+        schema({**base, "solar_azimuths": ["not-a-number"]})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["neighbour_rooms", "open_rooms"])
+@pytest.mark.parametrize(
+    ("references", "reason"),
+    [
+        (["living_room"], "self"),
+        (["hallway", "hallway"], "duplicate"),
+        (["unknown_area"], "unknown area"),
+    ],
+)
+async def test_save_room_rejects_bad_room_references(ws_hass, store, connection, field, references, reason):
+    """Self-references, duplicates and unknown area_ids are rejected."""
+    await store.async_load()
+    msg = {"id": 2, "type": "roommind/rooms/save", "area_id": "living_room", field: references}
+    with patch(
+        "custom_components.roommind.websocket_api._known_area_ids",
+        return_value={"living_room", "hallway"},
+    ):
+        await _save_room(ws_hass, connection, msg)
+
+    connection.send_error.assert_called_once()
+    assert connection.send_error.call_args[0][1] == "invalid_room_references"
+    assert reason.split()[0] in connection.send_error.call_args[0][2]
+    connection.send_result.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_save_room_skips_known_area_check_without_a_registry(ws_hass, store, connection):
+    """When no area registry is available, an unknown area_id is accepted (tests / startup)."""
+    await store.async_load()
+    msg = {
+        "id": 2,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room",
+        "neighbour_rooms": ["not_registered"],
+        "open_rooms": ["also_not_registered"],
+    }
+    with patch("custom_components.roommind.websocket_api._known_area_ids", return_value=None):
+        await _save_room(ws_hass, connection, msg)
+
+    connection.send_error.assert_not_called()
+    room = connection.send_result.call_args[0][1]["room"]
+    assert room["neighbour_rooms"] == ["not_registered"]
+    assert room["open_rooms"] == ["also_not_registered"]
+
+
+# ---------------------------------------------------------------------------
 # Diagnostics WS endpoint
 # ---------------------------------------------------------------------------
 

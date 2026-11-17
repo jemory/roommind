@@ -173,6 +173,9 @@ def _apply_room_defaults(room: dict) -> None:
     room.setdefault("occupancy_dwell_minutes", DEFAULT_OCCUPANCY_DWELL_MINUTES)
     room.setdefault("read_only_covers", [])
     room.setdefault("follow_house", True)
+    room.setdefault("solar_azimuths", [])
+    room.setdefault("neighbour_rooms", [])
+    room.setdefault("open_rooms", [])
 
 
 def strip_retired_room_keys(room: dict) -> dict:
@@ -465,6 +468,9 @@ class RoomMindStore:
             "window_close_delay": config.get("window_close_delay", 0),
             "interior_door_sensors": config.get("interior_door_sensors", []),
             "interior_door_delay": config.get("interior_door_delay", DEFAULT_INTERIOR_DOOR_DELAY_S),
+            "solar_azimuths": list(config.get("solar_azimuths") or []),
+            "neighbour_rooms": list(config.get("neighbour_rooms") or []),
+            "open_rooms": list(config.get("open_rooms") or []),
             "door_closed_mix_factor": config.get("door_closed_mix_factor", DEFAULT_DOOR_CLOSED_MIX_FACTOR),
             "comfort_temp": comfort_heat,
             "eco_temp": eco_heat,

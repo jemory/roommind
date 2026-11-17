@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
 from .rebound import (
@@ -49,7 +50,46 @@ from .rebound import (
 _LOGGER = logging.getLogger(__name__)
 
 # Version stamp of the persisted EKF layout (9 states, coupled forced air).
-EKF_VERSION = 7
+# v8 adds the regressor signature, which records the solar input and the house
+# reference the parameters were learned against, so a configuration change can
+# relearn exactly the affected parameters instead of everything or nothing.
+EKF_VERSION = 8
+
+# Highest version whose alpha-pegged recovery still applies. It was written as
+# ``version < EKF_VERSION`` when 7 was current, so it means "up to v6": bumping
+# EKF_VERSION must not widen it, or a schema-only migration would reset the
+# parameters of a perfectly healthy v7 model.
+_ALPHA_RECOVERY_MAX_EKF_VERSION = 6
+
+# The regressor a model is trained against, as persisted with it. "legacy" is
+# the horizontal-plane GHI input against the whole-house mean: every model
+# trained before orientation and room topology existed, and every room that
+# configures neither.
+LEGACY_SOLAR_REGRESSOR = "legacy"
+
+
+def regressor_signature(solar_azimuths: Sequence[int], local_reference: bool) -> dict[str, str]:
+    """Describe the inputs a room's parameters are fitted against.
+
+    ``beta_s`` is only meaningful for one solar input, and ``alpha_house`` and
+    ``beta_fan`` are only meaningful for one reference temperature. Recording
+    which ones they were learned against lets a room relearn just those
+    parameters when its configuration changes, and lets every room that
+    configures nothing keep learning exactly as before.
+
+    Args:
+        solar_azimuths: exterior glazing azimuths in use, empty for the
+            unoriented horizontal-plane estimate.
+        local_reference: True when the room couples to a neighbour-weighted
+            reference instead of the whole-house mean.
+
+    Returns:
+        ``{"solar": <signature>, "ref": "global"|"local"}``.
+    """
+    azimuths = sorted({int(round(float(azimuth))) % 360 for azimuth in solar_azimuths})
+    solar = LEGACY_SOLAR_REGRESSOR if not azimuths else ",".join(str(azimuth) for azimuth in azimuths)
+    return {"solar": solar, "ref": "local" if local_reference else "global"}
+
 
 # Below this the exact solution's ``1 / lam`` gain is replaced by an Euler step.
 _LAM_SMALL = 1e-6
@@ -532,6 +572,13 @@ class ThermalEKF:
         self._err_n: int = 0
         # Which states the last predict step could observe.
         self._excited: list[bool] = [True] * self._N
+        # The inputs these parameters are fitted against (see regressor_signature).
+        # A fresh model starts on the legacy ones, so a room that configures
+        # neither orientation nor topology keeps learning exactly as it always did.
+        self._regressor: dict[str, str] = {
+            "solar": LEGACY_SOLAR_REGRESSOR,
+            "ref": "global",
+        }
 
     @classmethod
     def _p_init_diag(cls) -> list[float]:
@@ -1289,6 +1336,7 @@ class ThermalEKF:
         """Serialize the full 9-state EKF for persistence."""
         return {
             "ekf_version": self.EKF_VERSION,
+            "regressor": dict(self._regressor),
             "x": list(self._x),
             "P": [list(row) for row in self._P],
             "n_updates": self._n_updates,
@@ -1305,6 +1353,63 @@ class ThermalEKF:
             "confidence_history": self.confidence_history,
             "forecast_error": {"day": self._err_day, "sum": self._err_sum, "n": self._err_n},
         }
+
+    @property
+    def regressor(self) -> dict[str, str]:
+        """The inputs these parameters were learned against."""
+        return dict(self._regressor)
+
+    def reset_parameter(self, state_idx: int, default: float) -> None:
+        """Relearn one parameter from its prior, leaving the rest of the filter alone.
+
+        The parameter's correlations are dropped and its variance returned to the
+        initial prior, so the filter re-estimates it on the evidence it would have
+        had on a fresh model, while every other learned value, the temperature
+        state and the sample counters survive.
+        """
+        if not 1 <= state_idx < self._N:
+            raise ValueError(f"state_idx must be a parameter index 1..{self._N - 1}")
+        self._x[state_idx] = default
+        p_init = self._p_init_diag()
+        for j in range(self._N):
+            if j == state_idx:
+                continue
+            self._P[state_idx][j] = 0.0
+            self._P[j][state_idx] = 0.0
+        self._P[state_idx][state_idx] = p_init[state_idx]
+        self._enforce_psd()
+
+    def apply_regressor_signature(self, signature: Mapping[str, str]) -> tuple[str, ...]:
+        """Adopt *signature*, relearning exactly the parameters its inputs changed.
+
+        ``beta_s`` is only meaningful for the solar input it was fitted against, and
+        ``alpha_house`` and ``beta_fan`` only for the reference temperature they
+        couple the room to, so a changed input resets those parameters and nothing
+        else. An unchanged signature is a no-op: that is what keeps a room which
+        configures neither orientation nor topology learning undisturbed.
+
+        Returns:
+            The names of the parameters that were reset (empty when unchanged).
+        """
+        current = dict(self._regressor)
+        target = dict(signature)
+        reset: list[str] = []
+        if target.get("solar", LEGACY_SOLAR_REGRESSOR) != current.get("solar", LEGACY_SOLAR_REGRESSOR):
+            self.reset_parameter(self._STATE_BETA_S, self._DEFAULT_BETA_S)
+            reset.append("beta_s")
+        if target.get("ref", "global") != current.get("ref", "global"):
+            self.reset_parameter(self._STATE_ALPHA_HOUSE, self._DEFAULT_ALPHA_HOUSE)
+            self.reset_parameter(self._STATE_BETA_FAN, self._DEFAULT_BETA_FAN)
+            reset.extend(("alpha_house", "beta_fan"))
+        self._regressor = target
+        if reset:
+            _LOGGER.info(
+                "ThermalEKF: relearning %s after its model inputs changed (%s -> %s)",
+                ", ".join(reset),
+                current,
+                target,
+            )
+        return tuple(reset)
 
     def boost_covariance(self, factor: float = 2.5) -> None:
         """Widen the parameter variances by *factor* to re-learn faster after a change in the room.
@@ -1461,6 +1566,19 @@ class ThermalEKF:
             ekf._err_day = err["day"]
             ekf._err_sum = float(err["sum"])
             ekf._err_n = err["n"]
+        # v8 records which inputs the parameters were fitted against. Older
+        # saves carry none, and every one of them was trained on the legacy
+        # inputs against the whole-house mean.
+        raw_regressor = data.get("regressor")
+        regressor = {"solar": LEGACY_SOLAR_REGRESSOR, "ref": "global"}
+        if isinstance(raw_regressor, dict):
+            saved_solar = raw_regressor.get("solar")
+            saved_ref = raw_regressor.get("ref")
+            if isinstance(saved_solar, str):
+                regressor["solar"] = saved_solar
+            if saved_ref in ("global", "local"):
+                regressor["ref"] = saved_ref
+        ekf._regressor = regressor
         # Recovery migrations for models with alpha pegged at the upper bound.
         # Such models cannot escape on their own: 4-sigma anomaly detection
         # soft-rejects the large innovations and cross-covariance pulls alpha
@@ -1473,9 +1591,11 @@ class ThermalEKF:
         # v<6 -> v6 (#301): recovery for models that drifted back to the bound.
         # v<=6 -> v7: legacy single-node layouts are migrated above; a pegged
         #   alpha cannot be a healthy forced-air model, so it is reset once.
+        # The bound is a fixed version rather than ``EKF_VERSION``: v8 only adds
+        # the regressor signature, so it must not trigger a wholesale reset.
         version_raw = data.get("ekf_version", 0)
         version = version_raw if isinstance(version_raw, int) else 0
-        if version < cls.EKF_VERSION and ekf._x[cls._STATE_ALPHA] >= cls._ALPHA_MAX * 0.99:
+        if version <= _ALPHA_RECOVERY_MAX_EKF_VERSION and ekf._x[cls._STATE_ALPHA] >= cls._ALPHA_MAX * 0.99:
             cls._reset_rc_params_for_recovery(ekf, version)
         # Apply bounds in case stored data is out of range
         ekf._clamp_parameters()

@@ -565,6 +565,26 @@ class TestProcess:
         mgr.process("room1", current_temp=24.2, q_rebound=None, **common)
         assert model_manager.update.call_args.kwargs["q_rebound"] is None
 
+    def test_process_forwards_per_room_solar_and_local_reference(self, mgr, model_manager):
+        """The coordinator's per-room q_solar and local T_house reach the EKF unchanged."""
+        mgr.process(
+            "r1",
+            **{
+                **self.COMMON,
+                "dt_minutes": EKF_UPDATE_MIN_DT,
+                "q_solar": 0.5,  # per-room oriented value from the coordinator
+                "shading_factor": 0.6,  # still applied here, not twice
+                "T_house": 24.0,  # this room's local reference
+            },
+            ekf_mode="idle",
+            ekf_pf=0.0,
+            window_open=False,
+            raw_open=False,
+        )
+        kwargs = model_manager.update.call_args.kwargs
+        assert kwargs["q_solar"] == pytest.approx(0.3)
+        assert kwargs["T_house"] == 24.0
+
 
 class TestRealModelIntegration:
     def test_circulating_batches_reach_the_ekf(self):

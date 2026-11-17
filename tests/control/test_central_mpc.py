@@ -41,6 +41,7 @@ from custom_components.roommind.control.central_mpc import (
     _series_at,
     bounded_dehumidified_cool_target,
     compute_house_temperature,
+    compute_room_reference_temperatures,
     driving_rooms,
     guardrail_breach_direction,
     is_room_mpc_ready,
@@ -303,6 +304,52 @@ class TestComputeHouseTemperature:
 
     def test_no_rooms_falls_back_to_default(self) -> None:
         assert compute_house_temperature([], {}) == DEFAULT_HOUSE_TEMP_C
+
+
+class TestRoomReferenceTemperatures:
+    """A room's local reference falls back to the whole-house mean when unconfigured."""
+
+    def test_isolated_room_uses_the_house_mean_exactly(self) -> None:
+        rooms = [make_room("a", 20.0), make_room("b", 24.0)]
+        temps = {"a": 20.0, "b": 24.0}
+
+        refs = compute_room_reference_temperatures(rooms, temps)
+
+        fallback = compute_house_temperature(rooms, temps)
+        assert refs == {"a": fallback, "b": fallback}
+
+    def test_single_warm_neighbour_becomes_the_reference(self) -> None:
+        rooms = [make_room("a", 20.0, neighbours={"b": 1.0}), make_room("b", 24.0)]
+        temps = {"a": 20.0, "b": 24.0}
+
+        refs = compute_room_reference_temperatures(rooms, temps)
+
+        assert refs["a"] == 24.0  # not the 22 C house mean
+        assert refs["b"] == 22.0
+
+    def test_window_open_neighbour_is_excluded(self) -> None:
+        rooms = [
+            make_room("a", 20.0, neighbours={"b": 1.0}),
+            make_room("b", 24.0, include_in_house_mean=False),
+        ]
+        temps = {"a": 20.0, "b": 24.0}
+
+        refs = compute_room_reference_temperatures(rooms, temps)
+
+        assert refs["a"] == compute_house_temperature(rooms, temps) == 20.0
+
+    def test_step_house_block_uses_each_rooms_own_reference(self) -> None:
+        model = RCModel(C=1.0, U=0.0, U_house=0.2, Q_solar=0.0, Q_heat=0.0, Q_cool=0.0)
+        other = make_room("b", 26.0, model=model)
+        local = make_room("a", 20.0, neighbours={"b": 1.0}, model=model)
+        global_ref = make_room("a", 20.0, model=model)
+        temps = {"a": 20.0, "b": 26.0}
+
+        local_next, _, _ = step_house_block([local, other], temps, {}, {}, MODE_IDLE, 20.0, 0)
+        global_next, _, _ = step_house_block([global_ref, other], temps, {}, {}, MODE_IDLE, 20.0, 0)
+
+        # The warm neighbour warms the local room faster than the 23 C house mean.
+        assert local_next["a"] > global_next["a"]
 
 
 class TestStepHouseBlock:
@@ -1326,6 +1373,37 @@ class TestCentralBangBang:
         assert CentralBangBang().decide(rooms=[room]) == MODE_HEATING
         room_cool = make_room("a", 23.0 + BANGBANG_COOL_HYSTERESIS + 0.01, cool=23.0)
         assert CentralBangBang().decide(rooms=[room_cool]) == MODE_COOLING
+
+    def test_mixable_allows_undeclared_or_shared_groups_only(self) -> None:
+        undeclared = make_room("a")
+        group_0 = make_room("b", mixing_group=0)
+        other_0 = make_room("c", mixing_group=0)
+        group_1 = make_room("d", mixing_group=1)
+        assert CentralBangBang._mixable(undeclared, group_0)
+        assert CentralBangBang._mixable(group_0, undeclared)
+        assert CentralBangBang._mixable(group_0, other_0)
+        assert not CentralBangBang._mixable(group_0, group_1)
+
+    def test_different_declared_groups_do_not_circulate(self) -> None:
+        office = make_room("office", 25.0, heat=20.0, cool=23.0, mixing_group=0)
+        living = make_room("living", 20.2, heat=20.0, cool=23.0, mixing_group=1)
+        assert CentralBangBang().decide(rooms=[office, living]) != MODE_CIRCULATING
+
+    def test_same_declared_group_still_circulates(self) -> None:
+        office = make_room("office", 25.0, heat=20.0, cool=23.0, mixing_group=0)
+        living = make_room("living", 20.2, heat=20.0, cool=23.0, mixing_group=0)
+        assert CentralBangBang().decide(rooms=[office, living]) == MODE_CIRCULATING
+
+    def test_spread_across_different_groups_does_not_circulate(self) -> None:
+        warm = make_room("warm", 23.5, heat=21.0, cool=23.0, mixing_group=0)
+        cool = make_room("cool", 20.3, heat=20.0, cool=23.0, mixing_group=1)
+        assert CentralBangBang().decide(rooms=[warm, cool]) != MODE_CIRCULATING
+
+    def test_undeclared_rooms_keep_the_old_circulation_behaviour(self) -> None:
+        # Both mixing_group=None: one bucket, identical to the pre-feature spread.
+        warm = make_room("warm", 23.5, heat=21.0, cool=23.0)
+        cool = make_room("cool", 20.3, heat=20.0, cool=23.0)
+        assert CentralBangBang().decide(rooms=[warm, cool]) == MODE_CIRCULATING
 
 
 # ---------------------------------------------------------------------------

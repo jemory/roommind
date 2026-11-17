@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 from homeassistant.core import Context
 
 DOMAIN = "roommind"
-VERSION = "3.0.2"
+VERSION = "3.0.3"
 
 # Platforms
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BINARY_SENSOR, Platform.CLIMATE]
@@ -181,6 +181,15 @@ COVER_PREDICTION_DT_MINUTES: float = 5.0  # time step for RC trajectory simulati
 COVER_MAX_PREDICTION_STD: float = 0.5  # max idle+solar prediction_std to activate RC tier
 COVER_CONFIDENCE_REFERENCE_SOLAR: float = 0.5  # reference q_solar for confidence check
 COVER_MIN_IDLE_FOR_LEARNED: int = 30  # Min idle observations before trusting EKF's beta_s
+
+# Oriented solar input. A room that declares its exterior glazing azimuths feeds
+# the model plane-of-array irradiance on its own facade instead of horizontal
+# GHI; windows are vertical, and the ground dresses the lower half of the view.
+SOLAR_WINDOW_TILT_DEG: float = 90.0
+SOLAR_GROUND_ALBEDO: float = 0.2
+# Below this solar elevation the beam term divides by a vanishing sine and the
+# remaining irradiance is treated as all-diffuse (sin 2.9 deg).
+SOLAR_MIN_BEAM_SIN_ELEVATION: float = 0.05
 COVER_POS_DEADBAND: int = 20  # min position change (%) to trigger motor movement
 COVER_REOPEN_STEP: int = 40  # min partial reopening (%) within a shading episode
 COVER_REOPEN_HOLD_SECONDS: int = 3600  # min time since the last move before a partial reopening
@@ -258,6 +267,13 @@ PRICE_SHIFT_MODES = [PRICE_SHIFT_COOL_ONLY, PRICE_SHIFT_BOTH]
 DEFAULT_INTERIOR_DOOR_DELAY_S = 60
 DEFAULT_DOOR_CLOSED_MIX_FACTOR = 0.40
 DOOR_CLOSED_SUPPLY_FACTOR = 0.75
+
+# Room-to-room connections a room declares. A doorway and a wide cased opening
+# admit very different air exchange, so both scale the neighbour's weight in the
+# room's local reference temperature. A room that declares nothing keeps the
+# whole-house mean it has always used.
+TOPOLOGY_DOOR_WEIGHT: float = 1.0
+TOPOLOGY_OPEN_WEIGHT: float = 3.0
 # Air-vs-mass relaxation of the forced-air rebound after a plant run stops.
 FORCED_AIR_REBOUND_TAU_MINUTES = 10.0
 FORCED_AIR_REBOUND_CUTOFF = 0.01

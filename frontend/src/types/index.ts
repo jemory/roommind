@@ -268,6 +268,12 @@ export interface RoomConfig {
   cover_schedules?: CoverScheduleEntry[];
   cover_schedule_selector_entity?: string;
   cover_orientations?: Record<string, number>;
+  /** Compass azimuths (deg, 0 = N, 0..359) of the room's exterior glazing. Empty = not configured. */
+  solar_azimuths?: number[];
+  /** area_ids of directly connected rooms (shares air through a doorway). */
+  neighbour_rooms?: string[];
+  /** area_ids of rooms in the same freely flowing air volume (open concept). */
+  open_rooms?: string[];
   covers_outdoor_min_temp?: number | null;
   covers_night_close?: boolean;
   covers_night_position?: number;

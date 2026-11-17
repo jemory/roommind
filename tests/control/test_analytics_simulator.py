@@ -221,6 +221,48 @@ class TestBuildForecastSolarSeries:
         assert series is not None
         assert len(series) == 20
 
+    def test_missing_or_empty_azimuths_keep_the_ghi_path_exactly(self) -> None:
+        """Omitting azimuths (or passing an empty list) is bit-identical to today."""
+        from unittest.mock import patch
+
+        with (
+            patch("custom_components.roommind.control.solar.build_solar_series", return_value=[0.1] * 4) as ghi,
+            patch(
+                "custom_components.roommind.control.solar.build_oriented_solar_series",
+                return_value=[0.9] * 4,
+            ) as oriented,
+        ):
+            plain = build_forecast_solar_series(52.0, 13.0, [], 4, shading_factor=0.5)
+            empty = build_forecast_solar_series(52.0, 13.0, [], 4, shading_factor=0.5, azimuths=[])
+
+        assert plain == [0.05] * 4
+        assert empty == plain
+        assert ghi.call_count == 2
+        oriented.assert_not_called()
+
+    def test_azimuths_select_the_oriented_series_with_the_same_clouds(self) -> None:
+        from unittest.mock import patch
+
+        forecast = [{"cloud_coverage": 20}, {"cloud_coverage": 40}]
+        with (
+            patch("custom_components.roommind.control.solar.build_solar_series", return_value=[0.1] * 8) as ghi,
+            patch(
+                "custom_components.roommind.control.solar.build_oriented_solar_series",
+                return_value=[0.8] * 8,
+            ) as oriented,
+        ):
+            series = build_forecast_solar_series(52.0, 13.0, forecast, 8, shading_factor=0.5, azimuths=[180, 90])
+
+        assert series == [0.4] * 8
+        ghi.assert_not_called()
+        oriented.assert_called_once()
+        assert oriented.call_args.args[3] == [180, 90]
+        # Cloud coverage is expanded to plan blocks exactly as the GHI path does.
+        assert oriented.call_args.kwargs["cloud_series"] == [20] * 8  # sliced to n_blocks
+
+    def test_no_coordinates_still_returns_none_with_azimuths(self) -> None:
+        assert build_forecast_solar_series(0.0, 0.0, [], 8, azimuths=[180]) is None
+
 
 # ---------------------------------------------------------------------------
 # Observed idle rate

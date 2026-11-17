@@ -1246,5 +1246,14 @@
   "house.error.band_order": "Le refroidissement doit rester au-dessus du chauffage.",
   "house.error.eco_band_order": "L'éco-refroidissement ne doit pas être inférieur à l'éco-chauffage.",
   "house.error.temp_range": "Une température est hors de la plage autorisée.",
-  "house.error.price_range": "Le décalage tarifaire doit rester entre 0 et 2 K."
+  "house.error.price_range": "Le décalage tarifaire doit rester entre 0 et 2 K.",
+  "room.section.solar": "Orientation solaire",
+  "room.section.connections": "Connexions entre pièces",
+  "solar.hint": "Avec une orientation définie, le modèle utilise le soleil frappant réellement cette façade au lieu d'une estimation sur plan horizontal. Laissez vide pour conserver le comportement actuel.",
+  "solar.copy_from_blinds": "Copier depuis les volets",
+  "connections.no_other_rooms": "Aucune autre pièce dans la maison pour l'instant.",
+  "connections.neighbour_title": "Pièces reliées par une porte",
+  "connections.neighbour_hint": "Une porte est un passage d'air normal entre les pièces. Laissez vide pour conserver le comportement actuel de la maison entière.",
+  "connections.open_title": "Pièces dans le même espace ouvert",
+  "connections.open_hint": "Une connexion en open space domine l'échange d'air de la pièce. Laissez vide pour conserver le comportement actuel de la maison entière."
 }

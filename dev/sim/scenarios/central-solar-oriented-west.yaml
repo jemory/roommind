@@ -1,0 +1,77 @@
+name: central-solar-oriented-west
+description: >
+  Clear late-April day near Chicago, single-family house on one Central Plant. The
+  living_room's 8 m2 of glazing faces WEST, so its whole solar gain arrives in the
+  afternoon, long after a horizontal-plane irradiance estimate has passed its peak. The
+  room declares `solar_azimuths: [270]`, so the model is fitted against irradiance on its
+  own facade instead of on a horizontal plane. Cooling is set high enough that the plant
+  mostly idles: the room free-floats under the sun, which is what makes the model's
+  30-minute temperature prediction a direct test of the solar term rather than of the
+  furnace's response.
+
+  This scenario is its own A/B baseline. Run it twice and diff the metrics:
+
+      dev/sim/bin/sim run central-solar-oriented-west
+      dev/sim/bin/sim run central-solar-oriented-west \
+          --set 'roommind.rooms.living_room.solar_azimuths=[]'
+      dev/sim/bin/sim compare <oriented-run> <baseline-run>
+
+  The oriented run must show a lower `prediction_mae_30m` for living_room. The
+  expectations below are deliberately loose bounds on what must ALWAYS hold (the model
+  trains, the room is not over-cooled, the plant stays well behaved); the quantitative
+  improvement is read from the comparison, not asserted here against a hard-coded number
+  that would drift with the weather seed.
+tags: [solar, model, central-plant]
+start: 2026-04-20T00:00
+duration: 2d
+location: {latitude: 41.88, longitude: -87.63, time_zone: America/Chicago, unit_system: us_customary, country: US}
+weather: {profile: temperate, fixed: {cloud: 5}}
+house:
+  building: us_wood_frame
+  outdoor: {sensors: {temperature: sensor.outdoor_temp}}
+  rooms:
+    living_room:
+      name: Living room
+      floor_area_m2: 30
+      exterior_wall_m2: 18
+      initial: {temperature: 20.0, mass_temperature: 20.0}
+      windows: [{orientation: W, area_m2: 5, g_value: 0.6}]
+      devices:
+        - {entity_id: climate.central_hvac, profile: central_furnace_hp, heat_capacity_w: 7000}
+      sensors:
+        temperature: {entity_id: sensor.living_room_temp}
+roommind:
+  settings:
+    outdoor_temp_sensor: sensor.outdoor_temp
+    weather_entity: weather.simhome
+    central_plant:
+      thermostat_entity: climate.central_hvac
+      nudge_delta_c: 1.5
+      max_nudge_headroom_c: 3.0
+      fallback_heat_c: 15.5
+      fallback_cool_c: 27.0
+      min_deadband_c: 2.5
+      min_run_minutes: 10
+      min_off_minutes: 5
+      exterior_open_policy: pause_unless_door_closed
+  rooms:
+    living_room:
+      temperature_sensor: sensor.living_room_temp
+      # Heating only, and a target well below what the afternoon sun delivers:
+      # the plant stays mostly idle and the room free-floats upward under the sun,
+      # so the model's error is dominated by the solar term rather than by the
+      # furnace's response. That is the whole point of this scenario.
+      climate_mode: heat_only
+      # The feature under test: the room's glazing faces west.
+      solar_azimuths: [270]
+      comfort_heat: 17.5
+      eco_heat: 12.0
+expect:
+  - {invariant: no_rejected_commands}
+  - {invariant: setpoints_within_device_range}
+  - {invariant: target_never_empty}
+  # The EKF must actually have trained on the oriented input over two days.
+  - {metric: model.n_updates, room: living_room, min: 100, label: model trained on the oriented input}
+  # With the plant idle the room must sit above its heating target in the
+  # afternoon, which is what makes the solar term the dominant error source.
+  - {check: "true_temp('living_room') > 19.0", at: "+0d17h", label: room is sun-warmed by late afternoon}

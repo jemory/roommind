@@ -1246,5 +1246,14 @@
   "house.error.band_order": "Il raffrescamento deve restare sopra il riscaldamento.",
   "house.error.eco_band_order": "L'eco-raffrescamento non deve essere inferiore all'eco-riscaldamento.",
   "house.error.temp_range": "Una temperatura è fuori dall'intervallo consentito.",
-  "house.error.price_range": "Lo spostamento del prezzo deve restare tra 0 e 2 K."
+  "house.error.price_range": "Lo spostamento del prezzo deve restare tra 0 e 2 K.",
+  "room.section.solar": "Orientamento solare",
+  "room.section.connections": "Collegamenti tra stanze",
+  "solar.hint": "Con un orientamento impostato, il modello usa il sole che colpisce realmente questa facciata invece di una stima su piano orizzontale. Lascia vuoto per mantenere il comportamento attuale.",
+  "solar.copy_from_blinds": "Copia dalle tende",
+  "connections.no_other_rooms": "Non ci sono ancora altre stanze in casa.",
+  "connections.neighbour_title": "Stanze collegate da una porta",
+  "connections.neighbour_hint": "Una porta è un normale passaggio d'aria tra le stanze. Lascia vuoto per mantenere il comportamento attuale dell'intera casa.",
+  "connections.open_title": "Stanze nello stesso spazio aperto",
+  "connections.open_hint": "Un collegamento a pianta aperta domina lo scambio d'aria della stanza. Lascia vuoto per mantenere il comportamento attuale dell'intera casa."
 }

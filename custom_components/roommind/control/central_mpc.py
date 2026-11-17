@@ -58,6 +58,7 @@ from ..utils.humidity_utils import (
 )
 from .rebound import advance_rebound, drive_for_mode, mean_rebound
 from .thermal_model import RCModel, RoomModelManager, ThermalEKF
+from .topology import reference_temperature
 
 # Pre-heat lead at the default comfort weight; the slider scales it to none at
 # the efficiency end.  The deadline planner never looks further ahead than this.
@@ -155,6 +156,11 @@ class RoomHorizonInput:
     preheat_enabled: bool = True
     #: False when the room's exterior window is open: it would poison the mean.
     include_in_house_mean: bool = True
+    #: Neighbour weights for this room's local reference, restricted to rooms
+    #: contributing to the house mean. Empty means use the global mean.
+    neighbours: Mapping[str, float] = field(default_factory=dict)
+    #: Connected component of the topology graph, None when undeclared.
+    mixing_group: int | None = None
     #: Whether this room's model passed the joint-MPC data gates.
     mpc_ready: bool = True
 
@@ -269,6 +275,33 @@ def compute_house_temperature(
     return sum(included) / len(included)
 
 
+def compute_room_reference_temperatures(
+    rooms: Sequence[RoomHorizonInput],
+    temperatures: Mapping[str, float],
+    extra_house_temp: float | None = None,
+) -> dict[str, float]:
+    """Per-room local reference temperatures, falling back to the house mean.
+
+    The include set is the rooms with ``include_in_house_mean`` present in
+    *temperatures*; each room's declared neighbours are restricted to it (and
+    never include the room itself). A room with no usable neighbours gets
+    ``compute_house_temperature(...)`` exactly, so an unconfigured house behaves
+    bit-identically to the previous single-reference model. The global house
+    trajectory is still published separately from :func:`compute_house_temperature`.
+    """
+    fallback = compute_house_temperature(rooms, temperatures, extra_house_temp)
+    included = {room.area_id for room in rooms if room.include_in_house_mean and room.area_id in temperatures}
+    result: dict[str, float] = {}
+    for room in rooms:
+        neighbours = {
+            neighbour: weight
+            for neighbour, weight in room.neighbours.items()
+            if neighbour in included and neighbour != room.area_id
+        }
+        result[room.area_id] = reference_temperature(neighbours, temperatures, fallback)
+    return result
+
+
 def step_house_block(
     rooms: Sequence[RoomHorizonInput],
     temperatures: Mapping[str, float],
@@ -306,6 +339,7 @@ def step_house_block(
     drive = drive_for_mode(action)
     u_fan = 1.0 if action == MODE_CIRCULATING else 0.0
     house_temp = compute_house_temperature(rooms, temperatures, extra_house_temp)
+    room_refs = compute_room_reference_temperatures(rooms, temperatures, extra_house_temp)
     next_temperatures: dict[str, float] = {}
     next_humidities: dict[str, float | None] = {}
     next_charges: dict[str, float] = {}
@@ -326,7 +360,7 @@ def step_house_block(
             T_outdoor,
             Q_act,
             dt_minutes,
-            T_house=house_temp,
+            T_house=room_refs.get(room.area_id, house_temp),
             u_fan=u_fan,
             door_mix_factor=room.door_mix_factor,
             door_supply_factor=room.door_supply_factor,
@@ -1128,12 +1162,26 @@ class CentralMPCOptimizer:
         T = temperatures[room.area_id]
         charge = charges.get(room.area_id, room.rebound_init)
         result = [T]
+        # Predict against this room's own reference when it has usable
+        # neighbours; otherwise keep the existing whole-house temperature.
+        ref_temp = house_temp
+        if room.neighbours:
+            included = {
+                other.area_id for other in self.rooms if other.include_in_house_mean and other.area_id in temperatures
+            }
+            neighbours = {
+                neighbour: weight
+                for neighbour, weight in room.neighbours.items()
+                if neighbour in included and neighbour != room.area_id
+            }
+            if neighbours:
+                ref_temp = reference_temperature(neighbours, temperatures, house_temp)
         T_idle = room.model.predict(
             T,
             self._outdoor_at(0),
             0.0,
             self.dt_minutes,
-            T_house=house_temp,
+            T_house=ref_temp,
             u_fan=0.0,
             door_mix_factor=room.door_mix_factor,
             door_supply_factor=room.door_supply_factor,
@@ -1153,7 +1201,7 @@ class CentralMPCOptimizer:
                 self._outdoor_at(j),
                 Q,
                 self.dt_minutes,
-                T_house=house_temp,
+                T_house=ref_temp,
                 u_fan=0.0,
                 door_mix_factor=room.door_mix_factor,
                 door_supply_factor=room.door_supply_factor,
@@ -1244,6 +1292,11 @@ class CentralBangBang:
     #: Weighted error below this is a mild disagreement Circulation may arbitrate.
     mild_error_c: float = 1.0
 
+    @staticmethod
+    def _mixable(a: RoomHorizonInput, b: RoomHorizonInput) -> bool:
+        """Two rooms can trade air when either has no declared group, or both share one."""
+        return a.mixing_group is None or b.mixing_group is None or a.mixing_group == b.mixing_group
+
     def decide(
         self,
         *,
@@ -1284,25 +1337,35 @@ class CentralBangBang:
                 cool_weight += w_i
         heat_error = heat_err / heat_weight if heat_weight > 0.0 else 0.0
         cool_error = cool_err / cool_weight if cool_weight > 0.0 else 0.0
-        occupied_temps = [T_eff for _room, T_eff, _heat, _cool in occupied_rooms]
-        spread = max(occupied_temps) - min(occupied_temps) if len(occupied_temps) >= 2 else 0.0
+        # Circulation only arbitrates rooms that can actually exchange air:
+        # undeclared rooms form one bucket, each declared group its own bucket.
+        buckets: dict[int | None, list[float]] = {}
+        for room, T_eff, _heat, _cool in occupied_rooms:
+            buckets.setdefault(room.mixing_group, []).append(T_eff)
+        group_spreads = [max(temps) - min(temps) for temps in buckets.values() if len(temps) >= 2]
+        spread = max(group_spreads, default=0.0)
 
         breach = self._guardrail_direction(rooms)
         if breach is not None and breach in legal:
             return breach
 
         cooling_rooms = [
-            room.area_id
+            room
             for room, T_eff, _heat, cool_target in occupied_rooms
             if cool_target is not None and T_eff - cool_target > BANGBANG_COOL_HYSTERESIS
         ]
         near_floor_rooms = [
-            room.area_id
+            room
             for room, T_eff, heat_target, _cool in occupied_rooms
             if heat_target is not None and T_eff <= heat_target + WARM_FLOOR_MARGIN_C
         ]
-        # Circulation only arbitrates a genuine disagreement between two rooms.
-        opposite_errors = any(cooling_id != warm_id for cooling_id in cooling_rooms for warm_id in near_floor_rooms)
+        # Circulation only arbitrates a genuine disagreement between two rooms
+        # that can trade air; a cross-group pair cannot equalise by mixing.
+        opposite_errors = any(
+            cooling.area_id != warm.area_id and self._mixable(cooling, warm)
+            for cooling in cooling_rooms
+            for warm in near_floor_rooms
+        )
         mild_spread = spread >= self.circulation_spread_c and (
             heat_error < self.mild_error_c and cool_error < self.mild_error_c
         )

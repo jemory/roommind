@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,12 +11,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from custom_components.roommind.const import DOMAIN, MODE_HEATING
-from custom_components.roommind.control.solar import compute_q_solar_norm
+from custom_components.roommind.control.solar import (
+    build_oriented_solar_series,
+    build_solar_series,
+    compute_q_solar_norm,
+)
+from custom_components.roommind.coordinator import _RoomCycle
 from custom_components.roommind.utils.history_store import HistoryStore
 
 from .conftest import Harness, make_room
 
 pytestmark = pytest.mark.asyncio
+
+_SOLAR_NOON_TS = datetime(2023, 6, 21, 11, 8, tzinfo=UTC).timestamp()
 
 
 def weather_service(forecast: list[dict]) -> Any:
@@ -273,3 +281,103 @@ async def test_an_entity_with_a_foreign_uid_is_left_alone(harness: Harness, fake
 
     assert fake_registry.removed == []
     assert "sensor.foreign" in fake_registry.entities
+
+
+# ── Per-room solar / topology fallbacks and MPC memoisation ─────────────
+
+
+async def test_mpc_builds_one_oriented_series_per_azimuth_tuple(harness: Harness):
+    """Same-facing rooms share one POA series; unconfigured rooms reuse one GHI series."""
+    coordinator = await harness.seed(
+        {
+            "south_east": make_room({"solar_azimuths": [180, 90]}),
+            "east_south": make_room({"solar_azimuths": [90, 180]}),
+            "west": make_room({"solar_azimuths": [270]}),
+            "plain": make_room(),
+        }
+    )
+    with (
+        patch(
+            "custom_components.roommind.coordinator.build_oriented_solar_series",
+            wraps=build_oriented_solar_series,
+        ) as oriented,
+        patch("custom_components.roommind.coordinator.build_solar_series", wraps=build_solar_series) as ghi,
+        # Pin solar noon so the facade series are non-zero and distinguishable.
+        patch("custom_components.roommind.coordinator.time.time", return_value=_SOLAR_NOON_TS),
+        patch.object(
+            coordinator._mpc_controller,
+            "evaluate",
+            wraps=coordinator._mpc_controller.evaluate,
+        ) as evaluate,
+    ):
+        await harness.cycle()
+
+    assert oriented.call_count == 2
+    assert ghi.call_count == 1
+    assert {tuple(call.args[3]) for call in oriented.call_args_list} == {(90, 180), (270,)}
+    rooms = {room.area_id: room for room in evaluate.call_args.kwargs["rooms"]}
+    assert rooms["south_east"].solar_series == rooms["east_south"].solar_series
+    assert rooms["west"].solar_series != rooms["south_east"].solar_series
+
+
+async def test_room_reference_falls_back_for_an_isolated_room(harness: Harness):
+    """A room with no neighbours keeps the house mean, exactly."""
+    coordinator = await harness.seed({"solo": make_room()})
+    cycles = [_RoomCycle(area_id="solo", room=make_room())]
+    graph = coordinator._build_room_graph(cycles)
+    temps = {"solo": 20.0}
+    included = coordinator._house_ref_included_area_ids(cycles)
+
+    assert not graph.configured
+    assert coordinator._room_ref_temp(cycles[0], graph, temps, included, 21.0) == 21.0
+
+
+async def test_only_neighbour_defines_the_local_reference(harness: Harness):
+    """A room whose only neighbour is warm uses that neighbour's temperature."""
+    coordinator = await harness.seed({"cool": make_room(), "warm": make_room({"neighbour_rooms": ["cool"]})})
+    cycles = [
+        _RoomCycle(area_id="cool", room=make_room(), current_temp=20.0),
+        _RoomCycle(
+            area_id="warm",
+            room=make_room({"neighbour_rooms": ["cool"]}),
+            current_temp=24.0,
+        ),
+    ]
+    graph = coordinator._build_room_graph(cycles)
+    temps = {"cool": 20.0, "warm": 24.0}
+    included = coordinator._house_ref_included_area_ids(cycles)
+
+    assert coordinator._room_ref_temp(cycles[0], graph, temps, included, 22.0) == 24.0
+    assert coordinator._room_ref_temp(cycles[1], graph, temps, included, 22.0) == 20.0
+
+
+async def test_a_window_open_neighbour_is_excluded_from_the_reference(harness: Harness):
+    """An open window removes a neighbour from the include set, restoring the fallback."""
+    coordinator = await harness.seed({"cool": make_room(), "warm": make_room()})
+    cycles = [
+        _RoomCycle(area_id="cool", room=make_room(), window_open=True, current_temp=20.0),
+        _RoomCycle(area_id="warm", room=make_room({"neighbour_rooms": ["cool"]}), current_temp=24.0),
+    ]
+    graph = coordinator._build_room_graph(cycles)
+    temps = {"cool": 20.0, "warm": 24.0}
+    included = coordinator._house_ref_included_area_ids(cycles)
+
+    assert "cool" not in included
+    assert coordinator._room_ref_temp(cycles[1], graph, temps, included, 22.0) == 22.0
+
+
+async def test_outdoor_cycles_are_never_topology_neighbours(harness: Harness):
+    """An outdoor area, even one declaring neighbours, is never part of the graph."""
+    coordinator = await harness.seed({"living": make_room()})
+    cycles = [
+        _RoomCycle(area_id="living", room=make_room()),
+        _RoomCycle(
+            area_id="porch",
+            room=make_room({"is_outdoor": True, "neighbour_rooms": ["living"]}),
+            is_outdoor=True,
+        ),
+    ]
+    graph = coordinator._build_room_graph(cycles)
+
+    assert set(graph.weights) == {"living"}
+    assert "porch" not in graph.mixing_group

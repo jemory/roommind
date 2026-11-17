@@ -12,6 +12,8 @@ import type {
   HouseLive,
 } from "../types";
 import "./room-detail/rs-room-hero";
+import "./room-detail/rs-solar-section";
+import "./room-detail/rs-connections-section";
 import "./rs-schedule-settings";
 import type { ScheduleCardPart } from "./rs-schedule-settings";
 import "./room-detail/rs-target-temps";
@@ -72,6 +74,11 @@ const asSet = (prop: string, read: (c: RoomConfig | null) => string[]): RoomFiel
   read,
   toState: (value) => new Set(value as string[]),
   toPayload: (state) => [...(state as Set<string>)],
+});
+const asNumberArray = (prop: string, read: (c: RoomConfig | null) => number[]): RoomFieldSync => ({
+  prop,
+  read,
+  toPayload: (state) => [...(state as number[])],
 });
 
 /**
@@ -168,6 +175,9 @@ const ROOM_FIELDS: [string, RoomFieldSync][] = [
   ["covers_snap_deploy", plain("_coversSnapDeploy", (c) => c?.covers_snap_deploy ?? false)],
   ["covers_window_hold", plain("_coversWindowHold", (c) => c?.covers_window_hold ?? false)],
   ["cover_orientations", plain("_coverOrientations", (c) => c?.cover_orientations ?? {})],
+  ["solar_azimuths", asNumberArray("_solarAzimuths", (c) => c?.solar_azimuths ?? [])],
+  ["neighbour_rooms", asSet("_neighbourRooms", (c) => c?.neighbour_rooms ?? [])],
+  ["open_rooms", asSet("_openRooms", (c) => c?.open_rooms ?? [])],
   [
     "covers_night_close_elevation",
     plain("_coversNightCloseElevation", (c) => c?.covers_night_close_elevation ?? 0),
@@ -265,6 +275,9 @@ export class RsRoomDetail extends LitElement {
   @state() private _coversSnapDeploy = false;
   @state() private _coversWindowHold = false;
   @state() private _coverOrientations: Record<string, number> = {};
+  @state() private _solarAzimuths: number[] = [];
+  @state() private _neighbourRooms: Set<string> = new Set();
+  @state() private _openRooms: Set<string> = new Set();
   @state() private _coversNightCloseElevation = 0;
   @state() private _coversNightCloseOffsetMinutes = 0;
   @state() private _coversOutdoorMinTemp: number | null = 10;
@@ -824,6 +837,28 @@ export class RsRoomDetail extends LitElement {
           .coverMinPositions=${this._coverMinPositions}
           @cover-resume-auto=${this._onCoverResumeAuto}
         ></rs-covers-section>
+      </rs-list-card>
+
+      <rs-list-card .heading=${localize("room.section.solar", l)}>
+        <rs-solar-section
+          .hass=${this.hass}
+          .solarAzimuths=${this._solarAzimuths}
+          .coverOrientations=${this._coverOrientations}
+          .language=${l}
+          @thermal-setting-changed=${this._onThermalSettingChanged}
+        ></rs-solar-section>
+      </rs-list-card>
+
+      <rs-list-card .heading=${localize("room.section.connections", l)}>
+        <rs-connections-section
+          .hass=${this.hass}
+          .areaId=${this.area.area_id}
+          .rooms=${this.rooms}
+          .neighbourRooms=${this._neighbourRooms}
+          .openRooms=${this._openRooms}
+          .language=${l}
+          @thermal-setting-changed=${this._onThermalSettingChanged}
+        ></rs-connections-section>
       </rs-list-card>
     `;
   }
@@ -1391,6 +1426,16 @@ export class RsRoomDetail extends LitElement {
     else if (key === "covers_outdoor_min_temp") this._coversOutdoorMinTemp = value as number | null;
     else if (key === "cover_min_positions")
       this._coverMinPositions = value as Record<string, number>;
+    this._autoSave();
+  }
+
+  /** Solar orientation and room connections: keys map straight onto their local state fields. */
+  private _onThermalSettingChanged(e: CustomEvent<{ key: string; value: unknown }>) {
+    e.stopPropagation();
+    const { key, value } = e.detail;
+    if (key === "solar_azimuths") this._solarAzimuths = value as number[];
+    else if (key === "neighbour_rooms") this._neighbourRooms = new Set(value as string[]);
+    else if (key === "open_rooms") this._openRooms = new Set(value as string[]);
     this._autoSave();
   }
 

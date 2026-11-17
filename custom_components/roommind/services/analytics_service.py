@@ -29,6 +29,7 @@ from ..control.solar import compute_q_solar_norm
 from ..control.thermal_model import ThermalEKF
 from ..utils.history_store import MODEL_INPUT_FIELDS
 from ..utils.price_utils import PriceSignal
+from ..utils.room_utils import room_solar_azimuths
 from .analytics_stats import compute_period_stats, compute_rhythm, rhythm_window
 from .model_backtest import backtest
 
@@ -516,6 +517,8 @@ async def build_analytics_data(
                     coordinator._weather_manager._outdoor_forecast,
                     len(target_forecast),
                     shading_factor=_shading,
+                    # The backtest must replay the same regressor the EKF trained on
+                    azimuths=room_solar_azimuths(room_config),
                 )
                 sim_q_occupancy = 0.0
                 for occ_eid in room_config.get("occupancy_sensors", []):

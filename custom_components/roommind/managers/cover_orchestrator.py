@@ -327,6 +327,11 @@ class CoverOrchestrator:
                 # GHI strength while the sun is on this facade, see _sunlit_weight()
                 _oriented_q_solar = q_solar * self._sunlit_weight(_sun_az, _surface_azimuths)
             else:
+                # Beam projection only, deliberately: this gate asks "is the sun on
+                # this side", and a facade lit only by diffuse sky and ground bounce
+                # gains little from shading while losing free heat in heating season.
+                # The diffuse and reflected terms belong in the load estimate below,
+                # which reads the plane-of-array series.
                 _sun_el = solar_elevation(self.hass.config.latitude, self.hass.config.longitude, _now)
                 _factors = [surface_irradiance_factor(_sun_az, _sun_el, az) for az in _surface_azimuths]
                 _oriented_q_solar = q_solar * (sum(_factors) / len(_factors))

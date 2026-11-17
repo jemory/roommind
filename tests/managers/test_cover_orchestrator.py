@@ -1930,6 +1930,18 @@ class TestOrientationGate:
         call_kwargs = cm.evaluate.call_args[1]
         assert call_kwargs["predicted_peak_temp"] == 25.0
 
+    def test_solar_series_reuses_the_oriented_builder(self):
+        """_solar_series already inherits POA: no rewrite needed."""
+        orch = CoverOrchestrator(_make_hass(), _make_cover_manager(), _make_model_manager())
+        with patch(
+            "custom_components.roommind.managers.cover_orchestrator.build_oriented_solar_series",
+            return_value=[0.1] * 6,
+        ) as oriented:
+            series = orch._solar_series(6, [180.0, 90.0])
+        assert series == [0.1] * 6
+        oriented.assert_called_once()
+        assert oriented.call_args.args[3] == [180.0, 90.0]
+
 
 # ── Shade first, cool the rest (rooms that can cool) ──────────────────
 

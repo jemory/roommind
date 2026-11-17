@@ -88,6 +88,28 @@ async def test_create_keeps_every_supplied_field(store):
     assert room["window_sensors"] == ["binary_sensor.window2"]
 
 
+async def test_create_and_merge_the_connectivity_keys(store):
+    await store.async_load()
+    config = {
+        "solar_azimuths": [0, 90],
+        "neighbour_rooms": ["hallway"],
+        "open_rooms": ["dining"],
+    }
+
+    created = await store.async_save_room("living_room", config)
+    assert created["solar_azimuths"] == [0, 90]
+    assert created["neighbour_rooms"] == ["hallway"]
+    assert created["open_rooms"] == ["dining"]
+
+    updated = await store.async_save_room(
+        "living_room",
+        {"solar_azimuths": [180], "neighbour_rooms": ["kitchen"], "open_rooms": []},
+    )
+    assert updated["solar_azimuths"] == [180]
+    assert updated["neighbour_rooms"] == ["kitchen"]
+    assert updated["open_rooms"] == []
+
+
 async def test_create_derives_the_occupancy_mode(store):
     await store.async_load()
 

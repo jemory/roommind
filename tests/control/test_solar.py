@@ -6,6 +6,7 @@ from datetime import UTC
 
 import pytest
 
+from custom_components.roommind.const import SOLAR_GROUND_ALBEDO
 from custom_components.roommind.control.solar import (
     _clear_sky_ghi,
     _cloud_attenuation,
@@ -13,8 +14,11 @@ from custom_components.roommind.control.solar import (
     _solar_position,
     build_oriented_solar_series,
     build_solar_series,
+    clear_sky_index,
     compute_q_solar_norm,
+    diffuse_fraction,
     estimate_solar_ghi,
+    plane_of_array_irradiance,
     solar_azimuth,
     surface_irradiance_factor,
 )
@@ -297,32 +301,51 @@ def test_build_oriented_solar_series_length():
 
 
 def test_build_oriented_solar_series_north_facing_near_zero():
-    """North-facing surface in Northern Hemisphere at noon → near-zero irradiance."""
+    """North facade gets diffuse sky + ground reflection, not exactly zero.
+
+    The old beam-only projection returned exactly 0.0 for a surface facing
+    away from the sun. A vertical north plane still sees half the isotropic
+    diffuse sky plus ground-reflected irradiance, so the value is now small
+    but strictly positive and well below the south-facing value.
+    """
     from datetime import datetime
 
     dt = datetime(2024, 6, 21, 12, 0, tzinfo=UTC)
     ts = dt.timestamp()
-    series = build_oriented_solar_series(50.0, 0.0, 6, [0.0], 5.0, start_ts=ts)
-    for v in series:
-        assert v == pytest.approx(0.0, abs=0.05), f"North-facing should get ~0 at noon, got {v}"
+    north = build_oriented_solar_series(50.0, 0.0, 6, [0.0], 5.0, start_ts=ts)
+    south = build_oriented_solar_series(50.0, 0.0, 6, [180.0], 5.0, start_ts=ts)
+    # North receives diffuse + ground: positive, but far below the sunlit south facade.
+    assert all(v > 0.0 for v in north), f"North facade should get diffuse+ground > 0, got {north}"
+    assert all(n < s for n, s in zip(north, south, strict=False)), "North must stay well below south"
 
 
 def test_build_oriented_solar_series_south_facing_positive():
-    """South-facing surface at noon in Northern Hemisphere → positive irradiance."""
+    """South-facing vertical plane in winter exceeds horizontal GHI.
+
+    With a low winter sun a vertical south facade sees the beam much closer
+    to normal incidence than the horizontal plane does, so its POA irradiance
+    is larger than GHI — the opposite of the old beam-only model's assumption
+    that an oriented value could never exceed GHI.
+    """
     from datetime import datetime
 
-    dt = datetime(2024, 6, 21, 12, 0, tzinfo=UTC)
+    # 41.9 deg N, winter noon: sun low in the south (~25 deg elevation).
+    dt = datetime(2024, 12, 21, 12, 0, tzinfo=UTC)
     ts = dt.timestamp()
-    oriented = build_oriented_solar_series(50.0, 0.0, 1, [180.0], 5.0, start_ts=ts)
-    base = build_solar_series(50.0, 0.0, 1, 5.0, start_ts=ts)
-    # South-facing should get meaningful fraction of GHI
+    oriented = build_oriented_solar_series(41.9, 0.0, 1, [180.0], 5.0, start_ts=ts)
+    base = build_solar_series(41.9, 0.0, 1, 5.0, start_ts=ts)
+    # Winter south vertical plane receives more than horizontal GHI.
     assert oriented[0] > 0
-    # But should not exceed the unoriented GHI
-    assert oriented[0] <= base[0] + 1e-9
+    assert oriented[0] > base[0], "Winter south POA should exceed horizontal GHI"
 
 
 def test_build_oriented_solar_series_corner_room_average():
-    """Corner room (south + east windows) → average factor between the two orientations."""
+    """Corner room (south + east windows) → average of the two POA values.
+
+    The series is the mean of per-orientation plane-of-array irradiance, so
+    the two-window average is still exactly the midpoint of the two single
+    orientations.
+    """
     from datetime import datetime
 
     dt = datetime(2024, 6, 21, 12, 0, tzinfo=UTC)  # Noon, sun roughly south
@@ -332,3 +355,154 @@ def test_build_oriented_solar_series_corner_room_average():
     corner = build_oriented_solar_series(50.0, 0.0, 1, [180.0, 90.0], 5.0, start_ts=ts)
     expected_avg = (south[0] + east[0]) / 2
     assert corner[0] == pytest.approx(expected_avg, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# clear_sky_index (Kasten-Czeplak)
+# ---------------------------------------------------------------------------
+
+
+def test_clear_sky_index_clear():
+    """0% cloud → index 1.0 (no attenuation)."""
+    assert clear_sky_index(0.0) == pytest.approx(1.0)
+
+
+def test_clear_sky_index_partial():
+    """50% cloud → 1 - 0.75 * 0.5**3.4 (hand-computed Kasten-Czeplak)."""
+    expected = 1.0 - 0.75 * (0.5**3.4)
+    assert clear_sky_index(50.0) == pytest.approx(expected)
+
+
+def test_clear_sky_index_overcast():
+    """100% cloud → index 0.25 (1 - 0.75)."""
+    assert clear_sky_index(100.0) == pytest.approx(0.25)
+
+
+def test_clear_sky_index_none_is_clear():
+    """Missing cloud data means clear sky (index 1.0)."""
+    assert clear_sky_index(None) == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# diffuse_fraction (Erbs, Klein & Duffie 1982)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kt", "expected"),
+    [
+        # kt <= 0.22 branch: 1 - 0.09*kt
+        (0.15, 1.0 - 0.09 * 0.15),  # 0.9865
+        (0.22, 1.0 - 0.09 * 0.22),  # 0.9802
+        # 0.22 < kt <= 0.80 branch: quartic fit
+        (
+            0.5,
+            0.9511 - 0.1604 * 0.5 + 4.388 * 0.5**2 - 16.638 * 0.5**3 + 12.336 * 0.5**4,
+        ),  # 0.65915
+        (
+            0.8,
+            0.9511 - 0.1604 * 0.8 + 4.388 * 0.8**2 - 16.638 * 0.8**3 + 12.336 * 0.8**4,
+        ),  # 0.1652696
+        # kt > 0.80 branch: constant
+        (0.9, 0.165),
+    ],
+)
+def test_diffuse_fraction_erbs(kt: float, expected: float):
+    """Erbs (1982) piecewise diffuse fraction matches hand-computed values."""
+    assert diffuse_fraction(kt) == pytest.approx(expected)
+
+
+def test_diffuse_fraction_clamped():
+    """Result is clamped to [0, 1] even for out-of-range clearness indices."""
+    assert 0.0 <= diffuse_fraction(-1.0) <= 1.0
+    assert 0.0 <= diffuse_fraction(2.0) <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# plane_of_array_irradiance
+# ---------------------------------------------------------------------------
+
+
+def test_plane_of_array_irradiance_night():
+    """POA is 0 at night (sun below horizon)."""
+    from datetime import datetime
+
+    dt = datetime(2024, 1, 15, 2, 0, tzinfo=UTC)
+    assert plane_of_array_irradiance(50.0, 10.0, dt.timestamp(), 180.0) == 0.0
+
+
+def test_plane_of_array_irradiance_north_noon_positive():
+    """North-facing vertical plane at noon gets small positive diffuse + ground.
+
+    The sun is in the south, so the beam term is zero for a north facade;
+    what remains is half the diffuse sky plus ground reflection (~150 W/m²
+    at 50 deg N on a clear June noon).
+    """
+    from datetime import datetime
+
+    ts = datetime(2024, 6, 21, 12, 0, tzinfo=UTC).timestamp()
+    north = plane_of_array_irradiance(50.0, 0.0, ts, 0.0)
+    south = plane_of_array_irradiance(50.0, 0.0, ts, 180.0)
+    assert 0.0 < north < south
+    # North sees only diffuse sky + ground on a vertical plane (cos_tilt ~ 0):
+    # POA = 0.5 * df * ghi + 0.5 * albedo * ghi.
+    ghi = estimate_solar_ghi(50.0, 0.0, ts)
+    expected = 0.5 * diffuse_fraction(clear_sky_index(None)) * ghi + 0.5 * SOLAR_GROUND_ALBEDO * ghi
+    assert north == pytest.approx(expected, rel=1e-6)
+
+
+def test_plane_of_array_overcast_azimuth_converges():
+    """Under uniform overcast, south and north facades converge.
+
+    At 100% cloud cover kt = 0.25 and the Erbs diffuse fraction is ~0.973,
+    so irradiance is almost entirely diffuse; the beam contribution that
+    distinguishes orientations becomes negligible and both facades approach
+    the same diffuse+ground value.
+    """
+    from datetime import datetime
+
+    ts = datetime(2024, 6, 21, 12, 0, tzinfo=UTC).timestamp()
+    south = plane_of_array_irradiance(50.0, 0.0, ts, 180.0, cloud_coverage=100.0)
+    north = plane_of_array_irradiance(50.0, 0.0, ts, 0.0, cloud_coverage=100.0)
+    # Both are close to the pure diffuse+ground value for a vertical plane
+    # (cos_tilt ~ 0): POA = 0.5 * df * ghi + 0.5 * albedo * ghi.
+    ghi = estimate_solar_ghi(50.0, 0.0, ts, cloud_coverage=100.0)
+    diffuse_poa = 0.5 * diffuse_fraction(clear_sky_index(100.0)) * ghi + 0.5 * SOLAR_GROUND_ALBEDO * ghi
+    assert south == pytest.approx(diffuse_poa, rel=0.05)
+    assert north == pytest.approx(diffuse_poa, rel=0.05)
+    # Azimuth barely matters under overcast: facades within a few percent.
+    assert abs(south - north) / south < 0.05
+
+
+def test_plane_of_array_grazing_sun_finite():
+    """Grazing sun just above the horizon gives a finite, small value.
+
+    Below SOLAR_MIN_BEAM_SIN_ELEVATION the beam split divides by a vanishing
+    sine; the model drops the beam term entirely rather than producing a huge
+    or NaN spike.
+    """
+    import math
+    from datetime import datetime
+
+    # Equator, a few minutes after sunrise: elevation ~0.8 deg (below clamp).
+    ts = datetime(2024, 6, 21, 6, 5, tzinfo=UTC).timestamp()
+    el, _ = _solar_position(0.0, 0.0, ts)
+    assert 0.0 < el < 2.0
+    value = plane_of_array_irradiance(0.0, 0.0, ts, 180.0)
+    assert math.isfinite(value)
+    assert 0.0 <= value < 10.0, f"Grazing-sun POA should be small and finite, got {value}"
+
+
+def test_plane_of_array_south_winter_exceeds_ghi():
+    """Winter south vertical plane exceeds horizontal GHI at 41.9 deg N.
+
+    A low winter sun strikes a south-facing wall almost head-on while the
+    horizontal plane receives it at a shallow angle, so POA > GHI (~598 vs
+    ~299 W/m² in this model — roughly double).
+    """
+    from datetime import datetime
+
+    ts = datetime(2024, 12, 21, 12, 0, tzinfo=UTC).timestamp()
+    poa = plane_of_array_irradiance(41.9, 0.0, ts, 180.0)
+    ghi = estimate_solar_ghi(41.9, 0.0, ts)
+    assert poa > ghi > 0.0

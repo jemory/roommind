@@ -52,6 +52,84 @@ async def test_save_room_creates_a_room_with_defaults(store):
     assert store.get_room("living_room") is not None
 
 
+# ---------------------------------------------------------------------------
+# Thermal-model connectivity keys (per-room)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_room_stores_the_connectivity_keys_as_empty_lists(store):
+    await store.async_load()
+
+    room = await store.async_save_room("living_room", {})
+
+    assert room["solar_azimuths"] == []
+    assert room["neighbour_rooms"] == []
+    assert room["open_rooms"] == []
+
+
+@pytest.mark.asyncio
+async def test_the_connectivity_keys_round_trip(store):
+    await store.async_load()
+    config = {
+        "solar_azimuths": [90, 180, 270],
+        "neighbour_rooms": ["hallway", "kitchen"],
+        "open_rooms": ["dining"],
+    }
+
+    room = await store.async_save_room("living_room", config)
+
+    assert room["solar_azimuths"] == [90, 180, 270]
+    assert room["neighbour_rooms"] == ["hallway", "kitchen"]
+    assert room["open_rooms"] == ["dining"]
+    assert store.get_room("living_room")["solar_azimuths"] == [90, 180, 270]
+    assert store.get_rooms()["living_room"]["neighbour_rooms"] == ["hallway", "kitchen"]
+    assert store.get_rooms()["living_room"]["open_rooms"] == ["dining"]
+
+
+@pytest.mark.asyncio
+async def test_stored_room_without_the_connectivity_keys_gains_them_on_read(store):
+    """A 3.0.2-era stored room gains the new keys harmlessly on get_room/get_rooms."""
+    store._store.async_load = AsyncMock(
+        return_value={
+            "rooms": {"living_room": {"area_id": "living_room", "display_name": "Living"}},
+            "settings": {},
+            "thermal_data": {},
+        }
+    )
+
+    await store.async_load()
+
+    room = store.get_room("living_room")
+    assert room["solar_azimuths"] == []
+    assert room["neighbour_rooms"] == []
+    assert room["open_rooms"] == []
+
+    rooms = store.get_rooms()
+    assert rooms["living_room"]["solar_azimuths"] == []
+    assert rooms["living_room"]["neighbour_rooms"] == []
+    assert rooms["living_room"]["open_rooms"] == []
+
+
+@pytest.mark.asyncio
+async def test_connectivity_lists_are_not_aliased_with_the_config(store):
+    await store.async_load()
+    config = {
+        "solar_azimuths": [90],
+        "neighbour_rooms": ["hallway"],
+        "open_rooms": ["dining"],
+    }
+
+    room = await store.async_save_room("living_room", config)
+    room["solar_azimuths"].append(180)
+    room["neighbour_rooms"].append("kitchen")
+    room["open_rooms"].append("lounge")
+
+    assert config["solar_azimuths"] == [90]
+    assert config["neighbour_rooms"] == ["hallway"]
+    assert config["open_rooms"] == ["dining"]
+
+
 @pytest.mark.asyncio
 async def test_save_room_merges_into_an_existing_room(store):
     await store.async_load()

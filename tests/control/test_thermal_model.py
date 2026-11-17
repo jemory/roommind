@@ -15,6 +15,7 @@ from custom_components.roommind.control.thermal_model import (
     RCModel,
     RoomModelManager,
     ThermalEKF,
+    regressor_signature,
 )
 
 # ---------------------------------------------------------------------------
@@ -473,8 +474,8 @@ def test_ekf_exact_branch_transition_equals_the_rc_model():
 
 def test_ekf_version_and_initial_state():
     ekf = ThermalEKF()
-    assert EKF_VERSION == 7
-    assert ThermalEKF.EKF_VERSION == 7
+    assert EKF_VERSION == 8
+    assert ThermalEKF.EKF_VERSION == 8
     assert ekf._N == 9
     assert len(ekf._x) == 9
     assert len(ekf._P) == 9
@@ -1188,7 +1189,7 @@ def test_ekf_serialization_roundtrip_preserves_the_9_state_filter():
         ekf.update(T, T_out, mode, 3.0, q_rebound=0.2, T_house=19.0, u_fan=1.0)
     data = ekf.to_dict()
     restored = ThermalEKF.from_dict(data)
-    assert data["ekf_version"] == 7
+    assert data["ekf_version"] == 8
     assert len(data["x"]) == 9
     assert len(data["P"]) == 9
     assert restored._x == pytest.approx(ekf._x, rel=1e-9)
@@ -1203,11 +1204,11 @@ def test_ekf_serialization_roundtrip_preserves_the_9_state_filter():
     assert restored.confidence == pytest.approx(ekf.confidence)
 
 
-def test_ekf_to_dict_writes_version_7_and_circulating_counter():
+def test_ekf_to_dict_writes_current_version_and_circulating_counter():
     ekf = _initialized_ekf()
     ekf.update(21.0, 10.0, MODE_CIRCULATING, 1.0, T_house=25.0, u_fan=1.0)
     data = ekf.to_dict()
-    assert data["ekf_version"] == 7
+    assert data["ekf_version"] == 8
     assert data["n_circulating"] == 1
 
 
@@ -1721,3 +1722,133 @@ def test_manager_repr():
     text = repr(mgr)
     assert "RoomModelManager" in text
     assert "room_a" in text
+
+
+# ---------------------------------------------------------------------------
+# Regressor signature and targeted relearning
+# ---------------------------------------------------------------------------
+
+
+def _ekf_with_parameters(**values: float) -> ThermalEKF:
+    """An initialized EKF with the given parameters forced away from their defaults."""
+    ekf = _initialized_ekf()
+    for name, value in values.items():
+        ekf._x[getattr(ThermalEKF, f"_STATE_{name.upper()}")] = value
+    return ekf
+
+
+def test_regressor_signature_is_legacy_without_azimuths():
+    assert regressor_signature([], False) == {"solar": "legacy", "ref": "global"}
+    assert regressor_signature([], True) == {"solar": "legacy", "ref": "local"}
+
+
+def test_regressor_signature_canonicalises_the_azimuths():
+    """Order, duplicates, floats and out-of-range values must not yield two signatures."""
+    assert regressor_signature([225.4, 180, 180, 45], False)["solar"] == "45,180,225"
+    assert regressor_signature([360, 0], False)["solar"] == "0"
+
+
+def test_reset_parameter_restores_the_prior_and_drops_correlations():
+    ekf = _initialized_ekf()
+    idx = ThermalEKF._STATE_BETA_S
+    ekf._x[idx] = 9.9
+    ekf._P[idx][0] = 0.25
+    ekf._P[0][idx] = 0.25
+    untouched = list(ekf._x)
+
+    ekf.reset_parameter(idx, ThermalEKF._DEFAULT_BETA_S)
+
+    assert ekf._x[idx] == pytest.approx(ThermalEKF._DEFAULT_BETA_S)
+    assert ekf._P[idx][idx] == pytest.approx(ThermalEKF._P_INIT_BETA_S)
+    assert ekf._P[idx][0] == 0.0
+    assert ekf._P[0][idx] == 0.0
+    for other in range(ThermalEKF._N):
+        if other != idx:
+            assert ekf._x[other] == untouched[other]
+
+
+def test_reset_parameter_refuses_the_temperature_state():
+    """T is measured, not learned; resetting it would discard the current reading."""
+    ekf = _initialized_ekf()
+    with pytest.raises(ValueError, match="parameter index"):
+        ekf.reset_parameter(ThermalEKF._STATE_T, 20.0)
+
+
+def test_apply_regressor_signature_relearns_beta_s_when_solar_changes():
+    ekf = _ekf_with_parameters(alpha_house=0.55, beta_s=7.5)
+
+    reset = ekf.apply_regressor_signature(regressor_signature([180], False))
+
+    assert reset == ("beta_s",)
+    assert ekf._x[ThermalEKF._STATE_BETA_S] == pytest.approx(ThermalEKF._DEFAULT_BETA_S)
+    assert ekf._x[ThermalEKF._STATE_ALPHA_HOUSE] == pytest.approx(0.55)
+    assert ekf.regressor == {"solar": "180", "ref": "global"}
+
+
+def test_apply_regressor_signature_relearns_the_house_pair_when_the_reference_changes():
+    """alpha_house and beta_fan both couple to the reference, so both are meaningless after a change."""
+    ekf = _ekf_with_parameters(beta_s=7.5)
+
+    reset = ekf.apply_regressor_signature(regressor_signature([], True))
+
+    assert reset == ("alpha_house", "beta_fan")
+    assert ekf._x[ThermalEKF._STATE_ALPHA_HOUSE] == pytest.approx(ThermalEKF._DEFAULT_ALPHA_HOUSE)
+    assert ekf._x[ThermalEKF._STATE_BETA_FAN] == pytest.approx(ThermalEKF._DEFAULT_BETA_FAN)
+    assert ekf._x[ThermalEKF._STATE_BETA_S] == pytest.approx(7.5)
+
+
+def test_apply_regressor_signature_is_a_noop_when_the_inputs_are_unchanged():
+    """This is what keeps a room that configures nothing learning undisturbed."""
+    ekf = _initialized_ekf()
+    for _ in range(10):
+        ekf.update(21.4, 5.0, "idle", 3.0, T_house=24.0, q_solar=0.6)
+    before = list(ekf._x)
+
+    reset = ekf.apply_regressor_signature(regressor_signature([], False))
+
+    assert reset == ()
+    assert ekf._x == pytest.approx(before)
+
+
+def test_regressor_round_trips_through_persistence():
+    ekf = _initialized_ekf()
+    ekf.apply_regressor_signature(regressor_signature([225, 180], True))
+
+    data = ekf.to_dict()
+
+    assert data["regressor"] == {"solar": "180,225", "ref": "local"}
+    assert ThermalEKF.from_dict(data).regressor == {"solar": "180,225", "ref": "local"}
+
+
+def test_from_dict_without_a_regressor_falls_back_to_the_legacy_inputs():
+    """Every model saved before v8 was trained on the unoriented GHI and the house mean."""
+    ekf = ThermalEKF.from_dict({"ekf_version": 7, "x": [20.0] + [0.12] * 8, "n_updates": 5})
+
+    assert ekf.regressor == {"solar": "legacy", "ref": "global"}
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, {"solar": "legacy", "ref": "global"}),
+        ([], {"solar": "legacy", "ref": "global"}),
+        ({"solar": 5, "ref": "sideways"}, {"solar": "legacy", "ref": "global"}),
+        ({"ref": "local"}, {"solar": "legacy", "ref": "local"}),
+    ],
+)
+def test_from_dict_ignores_a_malformed_regressor(raw: object, expected: dict[str, str]) -> None:
+    data = {"ekf_version": 8, "x": [20.0] + [0.12] * 8, "n_updates": 5, "regressor": raw}
+
+    assert ThermalEKF.from_dict(data).regressor == expected
+
+
+def test_v7_model_with_pegged_alpha_is_not_reset_by_the_v8_migration():
+    """The v8 bump is schema-only; the alpha-pegged recovery keeps its v<=6 bound."""
+    data = {
+        "ekf_version": 7,
+        "x": [20.0, ThermalEKF._ALPHA_MAX, 0.2, 4.0, 3.5, 0.8, 0.5, 0.3, 0.3],
+    }
+
+    ekf = ThermalEKF.from_dict(data)
+
+    assert ekf._x[ThermalEKF._STATE_ALPHA] == pytest.approx(ThermalEKF._ALPHA_MAX)

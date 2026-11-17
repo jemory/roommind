@@ -54,9 +54,21 @@ A guard that holds a run shows on the plant status, and the rooms report why the
 
 ### Self-learning model per Thermal Zone
 
-Each room with its own temperature sensor gets an Extended Kalman Filter. It learns the room's heat loss against outdoor air, its response to furnace heating and heat-pump cooling, its solar gain, internal gains from people, and its coupling to the **House Reference Temperature**. Because every room is modelled against one live house temperature, the filters stay decoupled and identifiable from room thermistors alone — no floorplan, no pairwise conductance matrix.
+Each room with its own temperature sensor gets an Extended Kalman Filter. It learns the room's heat loss against outdoor air, its response to furnace heating and heat-pump cooling, its solar gain, internal gains from people, and its coupling to the **House Reference Temperature**. Each room carries its own gain against a shared reference rather than a matrix of pairwise room conductances, which keeps the filters decoupled (`O(N)`) and identifiable from room thermistors alone: pairwise conductances are collinear and cannot be pinned down from closed-loop room temperatures. A room can narrow that reference to the rooms it actually touches — see [Room connections](#room-connections) — without adding estimated parameters.
 
 Rooms without their own sensor still get targets and shades, but no learned model; they cannot drive the plan with the same confidence, which is why a temperature sensor per room is the single most useful addition.
+
+### Room connections
+
+By default a room is modelled against the mean of every conditioned room. That is a good assumption for a compact house and a poor one for a room that is cut off from most of it. A room can therefore declare which rooms it exchanges air with:
+
+- **Rooms connected by a doorway** share air through a normal interior door.
+- **Rooms in the same open space** share one freely flowing air volume — a cased opening or open-plan kitchen and living room.
+
+With connections declared, the room's reference becomes the weighted mean of those neighbours instead of the whole-house mean, so it stops exchanging heat with rooms it does not touch and stops being dragged by a room of entirely different size. An open-space connection outweighs a doorway, because a wide opening moves far more air than a door does.
+
+Declaring is optional and reversible: a room with no connections keeps the whole-house mean, exactly as before. Connections are declared once from either side — the pair is joined from whichever room lists it. Adding or changing them makes the room relearn its coupling (`alpha_house`) and blower mixing (`beta_fan`), because both parameters are only meaningful against the reference they were fitted to; expect a short relearning period after a change. Existing **Interior Door** sensors continue to work as before and are independent of this setting.
+
 
 ### Air Circulation mixing (`beta_fan`)
 
@@ -71,6 +83,11 @@ Before a schedule block raises a room's target, the plan starts heating early en
 ### Solar gain
 
 RoomMind estimates solar irradiance from sun position and weather data, per window orientation and cover position, and learns each room's solar response. A sunny room is heated by the sun instead of the furnace, and a south-facing room may need shading or cooling hours before the thermostat's hallway does.
+
+Set the room's **solar orientation** and the model uses the sun actually striking that facade: direct sun at its real angle of incidence, plus diffuse sky and ground reflection. Without an orientation the model falls back to a horizontal-plane estimate, which gets the *daily total* roughly right but the *shape* wrong — a west-facing room is predicted to gain most at midday rather than in the afternoon, and a north-facing room is predicted to gain nothing at all. For a room with substantial glazing, or any room that does not face south, setting the orientation is worth more than any weather improvement, and it is free.
+
+If the room's blinds already have an orientation configured, "Copy from blinds" fills the same directions in one click. A room that sets nothing keeps the horizontal-plane estimate.
+
 
 ## Occupancy and Room Priority
 

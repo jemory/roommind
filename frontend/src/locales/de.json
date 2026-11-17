@@ -1246,5 +1246,14 @@
   "house.error.band_order": "Kühlen muss über Heizen bleiben.",
   "house.error.eco_band_order": "Eco-Kühlen darf nicht unter Eco-Heizen liegen.",
   "house.error.temp_range": "Eine Temperatur liegt außerhalb des erlaubten Bereichs.",
-  "house.error.price_range": "Die Preisverschiebung muss zwischen 0 und 2 K liegen."
+  "house.error.price_range": "Die Preisverschiebung muss zwischen 0 und 2 K liegen.",
+  "room.section.solar": "Sonnenausrichtung",
+  "room.section.connections": "Raumverbindungen",
+  "solar.hint": "Mit eingestellter Ausrichtung nutzt das Modell die Sonne, die tatsächlich auf diese Fassade trifft, statt einer Schätzung auf waagerechter Ebene. Leer lassen, um das bisherige Verhalten zu behalten.",
+  "solar.copy_from_blinds": "Von Rollläden übernehmen",
+  "connections.no_other_rooms": "Noch keine weiteren Räume im Haus.",
+  "connections.neighbour_title": "Räume mit Türverbindung",
+  "connections.neighbour_hint": "Eine Tür ist ein normaler Luftpfad zwischen Räumen. Leer lassen, um das bisherige Verhalten für das ganze Haus zu behalten.",
+  "connections.open_title": "Räume im selben offenen Bereich",
+  "connections.open_hint": "Eine offene Verbindung bestimmt den Luftaustausch des Raums maßgeblich. Leer lassen, um das bisherige Verhalten für das ganze Haus zu behalten."
 }

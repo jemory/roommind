@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -15,13 +16,18 @@ from custom_components.roommind.const import (
     MODE_IDLE,
     THERMAL_SAVE_CYCLES,
 )
-from custom_components.roommind.control.thermal_model import RoomModelManager
+from custom_components.roommind.control.solar import compute_q_solar_norm, plane_of_array_irradiance
+from custom_components.roommind.control.thermal_model import RoomModelManager, ThermalEKF, regressor_signature
 from custom_components.roommind.coordinator import _RoomCycle
 from custom_components.roommind.utils.history_store import MODEL_INPUT_FIELDS
 
 from .conftest import DEFAULT_THERMOSTAT_ATTRIBUTES, THERMOSTAT_ENTITY, Harness, make_room
 
 pytestmark = pytest.mark.asyncio
+
+# Solar noon (UTC) at the harness coordinates, so the facade and the horizontal
+# plane receive measurably different irradiance.
+_FIXED_TS = datetime(2023, 6, 21, 11, 8, tzinfo=UTC).timestamp()
 
 
 async def test_a_heating_cycle_charges_the_forced_air_rebound(harness: Harness, fake_states):
@@ -322,3 +328,78 @@ async def test_releasing_ventilation_tolerates_a_failing_service(harness: Harnes
 
     # The unit stays owned because the off call failed, but the cycle does not raise.
     assert coordinator._ventilation.is_running("fan.vent") is True
+
+
+# ── Per-room solar and regressor-signature wiring ───────────────────────
+
+
+async def test_unconfigured_room_keeps_the_house_solar_value(harness: Harness):
+    """A room with no solar_azimuths keeps today's exact GHI value."""
+    coordinator = await harness.seed({"plain": make_room()})
+    lat, lon = harness.hass.config.latitude, harness.hass.config.longitude
+    ghi = compute_q_solar_norm(lat, lon, _FIXED_TS, None)
+    cycles = [
+        _RoomCycle(area_id="plain", room=make_room()),
+        _RoomCycle(area_id="oriented", room=make_room({"solar_azimuths": [180]})),
+    ]
+    with patch("custom_components.roommind.coordinator.time.time", return_value=_FIXED_TS):
+        coordinator._current_q_solar = ghi
+        coordinator._refresh_room_q_solar(cycles, None)
+
+    assert coordinator._current_q_solar_by_room["plain"] == ghi
+    assert coordinator._room_q_solar(cycles[0]) == ghi
+    # An unknown area id also falls back to the house-wide value.
+    assert coordinator._room_q_solar(_RoomCycle(area_id="missing", room={})) == ghi
+    expected_poa = plane_of_array_irradiance(lat, lon, _FIXED_TS, 180, cloud_coverage=None) / 1000.0
+    assert coordinator._current_q_solar_by_room["oriented"] == pytest.approx(expected_poa)
+    assert expected_poa != ghi  # the oriented value is genuinely different
+
+
+async def test_model_input_row_records_oriented_solar_times_shading(harness: Harness):
+    """The backtest replays the exact per-room regressor the EKF trained on."""
+    coordinator = await harness.seed({"living_room": make_room({"solar_azimuths": [180]})})
+    coordinator._current_q_solar = 0.8
+    coordinator._current_q_solar_by_room = {"living_room": 0.5}
+    cycle = _RoomCycle(area_id="living_room", room=make_room({"solar_azimuths": [180]}), shading_factor=0.6)
+
+    row = coordinator._model_input_row(cycle, MODE_HEATING, 20.0)
+
+    assert row["model_solar"] == round(0.5 * 0.6, 3)
+    assert row["model_solar"] != round(0.8 * 0.6, 3)
+
+
+async def test_history_solar_irradiance_remains_horizontal_ghi(harness: Harness):
+    """The user-facing history field keeps the horizontal GHI, not the model input."""
+    coordinator = await harness.seed({"living_room": make_room({"solar_azimuths": [180]})})
+    await harness.cycle()
+    coordinator._current_q_solar = 0.8
+    coordinator._current_q_solar_by_room = {"living_room": 0.5}
+    room = make_room({"solar_azimuths": [180]})
+    cycle = _RoomCycle(area_id="living_room", room=room, shading_factor=0.6)
+    state = harness.coordinator.rooms["living_room"]  # type: ignore[union-attr]
+    coordinator._history_store.record.reset_mock()
+    await coordinator._async_record_history_row("living_room", cycle, state, None, time.time())
+    row = coordinator._history_store.record.call_args.args[1]
+
+    assert row["solar_irradiance"] == 0.8
+    assert coordinator._model_input_row(cycle, MODE_IDLE, 20.0)["model_solar"] == 0.3
+
+
+async def test_regressor_signature_is_applied_even_when_room_is_not_trainable(harness: Harness):
+    """A saved configuration change is picked up on the first cycle, before the training gate."""
+    coordinator = await harness.seed(
+        {
+            "oriented": make_room({"solar_azimuths": [180]}),
+            "connected": make_room({"neighbour_rooms": ["other"]}),
+            "other": make_room(),
+        },
+        settings={"learning_disabled_rooms": ["oriented"]},
+    )
+    with patch.object(ThermalEKF, "apply_regressor_signature", autospec=True) as apply:
+        await harness.cycle()
+
+    oriented = coordinator._model_manager.get_estimator("oriented")
+    connected = coordinator._model_manager.get_estimator("connected")
+    by_estimator = {id(call.args[0]): call.args[1] for call in apply.call_args_list}
+    assert by_estimator[id(oriented)] == regressor_signature([180], False)
+    assert by_estimator[id(connected)] == regressor_signature((), True)

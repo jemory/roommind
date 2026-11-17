@@ -56,7 +56,7 @@ RoomMind runs the **Central Plant** of a ducted forced-air home from Home Assist
   </tr>
   <tr>
     <td>🧠 <b>Per-room models</b></td>
-    <td>An Extended Kalman Filter per Thermal Zone against the House Reference Temperature: heat loss, furnace and heat-pump response, solar gain and learned Circulation mixing (<code>beta_fan</code>) · predictive whole-home MPC over <code>idle</code>, <code>heating</code>, <code>cooling</code> and <code>circulating</code> · on/off control while the models are still learning</td>
+    <td>An Extended Kalman Filter per Thermal Zone against the House Reference Temperature: heat loss, furnace and heat-pump response, solar gain and learned Circulation mixing (<code>beta_fan</code>) · <b>oriented solar</b> on the room's own glazing azimuths and an optional <b>local reference</b> from declared room connections · predictive whole-home MPC over <code>idle</code>, <code>heating</code>, <code>cooling</code> and <code>circulating</code> · on/off control while the models are still learning</td>
   </tr>
   <tr>
     <td>👥 <b>Occupancy &amp; priority</b></td>
@@ -179,7 +179,9 @@ Why not just send the target: the thermostat senses temperature in one hallway. 
 
 ### Per-room models and the House Reference Temperature
 
-Each Thermal Zone has its own Extended Kalman Filter. It learns the room's heat loss against outdoor air, its response to furnace heating and heat-pump cooling, its solar gain — and its coupling to the **House Reference Temperature**, both passive (`beta_f`) and while the blower mixes air through the ducts (`beta_fan`). Coupling every room to one live house temperature keeps estimation decoupled and identifiable from room thermistors alone.
+Each Thermal Zone has its own Extended Kalman Filter. It learns the room's heat loss against outdoor air, its response to furnace heating and heat-pump cooling, its solar gain — and its coupling to the **House Reference Temperature**, both passive (`beta_f`) and while the blower mixes air through the ducts (`beta_fan`). Each room carries its own gain against a shared reference instead of a matrix of pairwise room conductances, which keeps estimation decoupled and identifiable from room thermistors alone.
+
+Two optional settings sharpen the inputs those gains are fitted against. A room's **solar orientation** makes the solar term irradiance on that room's own facade — direct sun at its true angle of incidence plus diffuse sky and ground reflection — instead of a horizontal-plane estimate that peaks at midday whatever way the windows face. A room's **connections** (through doorways, or sharing an open space) replace the whole-house mean with the weighted mean of the rooms it actually exchanges air with. A room that sets neither keeps the previous behaviour exactly, and changing either makes that room relearn just the affected parameters.
 
 ### Occupancy-Driven Room Priority and Occupancy Trends
 
