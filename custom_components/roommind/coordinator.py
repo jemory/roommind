@@ -43,6 +43,7 @@ from .const import (
     DEFAULT_ECO_COOL,
     DEFAULT_ECO_HEAT,
     DOMAIN,
+    GLOBAL_ENTITY_UNIQUE_IDS,
     HISTORY_ROTATE_CYCLES,
     HISTORY_WRITE_CYCLES,
     MAX_SENSOR_STALENESS,
@@ -2112,7 +2113,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         rooms = rooms_with_area(self.hass, store.get_rooms())
         registry = er.async_get(self.hass)
 
-        global_uids = {f"{DOMAIN}_vacation", f"{DOMAIN}_climate_control"}
+        global_uids = GLOBAL_ENTITY_UNIQUE_IDS
 
         to_remove: list[str] = []
         for entity_entry in registry.entities.values():

@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 from homeassistant.core import Context
 
 DOMAIN = "roommind"
-VERSION = "3.0.1"
+VERSION = "3.0.2"
 
 # Platforms
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BINARY_SENSOR, Platform.CLIMATE]
@@ -79,6 +79,29 @@ ROOMMIND_CONTEXT_ID = "roommind"
 def make_roommind_context() -> Context:
     """Create a HA Context tagged as originating from RoomMind."""
     return Context(parent_id=ROOMMIND_CONTEXT_ID)
+
+
+# Integration-owned entities that belong to no room. The orphaned-entity cleanup
+# removes every other RoomMind registry entry whose unique_id does not match a
+# room, and it runs on every setup, so a global entity missing from
+# ``GLOBAL_ENTITY_UNIQUE_IDS`` is deleted on the next restart. Each class takes
+# its unique_id from these constants and a test asserts the set stays complete.
+ENTITY_UID_CENTRAL_ACTION = f"{DOMAIN}_central_action"
+ENTITY_UID_HOUSE_TEMPERATURE = f"{DOMAIN}_house_temperature"
+ENTITY_UID_HOUSE_CLIMATE = f"{DOMAIN}_house_climate"
+ENTITY_UID_WET_COIL_LOCKOUT = f"{DOMAIN}_wet_coil_lockout"
+ENTITY_UID_VACATION = f"{DOMAIN}_vacation"
+ENTITY_UID_GLOBAL_CLIMATE_CONTROL = f"{DOMAIN}_climate_control"
+GLOBAL_ENTITY_UNIQUE_IDS: frozenset[str] = frozenset(
+    {
+        ENTITY_UID_CENTRAL_ACTION,
+        ENTITY_UID_HOUSE_TEMPERATURE,
+        ENTITY_UID_HOUSE_CLIMATE,
+        ENTITY_UID_WET_COIL_LOCKOUT,
+        ENTITY_UID_VACATION,
+        ENTITY_UID_GLOBAL_CLIMATE_CONTROL,
+    }
+)
 
 
 class TargetTemps(NamedTuple):

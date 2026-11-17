@@ -206,6 +206,70 @@ async def test_orphaned_entities_are_kept_when_the_features_are_configured(harne
     assert fake_registry.removed == []
 
 
+async def test_the_plant_and_house_entities_survive_the_orphan_cleanup(harness: Harness, fake_registry):
+    """Integration-owned entities belong to no room and must never be swept.
+
+    The cleanup runs on every setup, right after the platforms are forwarded, so a
+    global entity missing from the keep set vanishes from the state machine on each
+    restart. The house thermostat did exactly that in 3.0.1.
+    """
+    global_uids = [
+        f"{DOMAIN}_vacation",
+        f"{DOMAIN}_climate_control",
+        f"{DOMAIN}_central_action",
+        f"{DOMAIN}_house_temperature",
+        f"{DOMAIN}_wet_coil_lockout",
+        f"{DOMAIN}_house_climate",
+    ]
+    fake_registry.entities = {
+        f"sensor.global_{index}": SimpleNamespace(entity_id=f"sensor.global_{index}", platform=DOMAIN, unique_id=uid)
+        for index, uid in enumerate(global_uids)
+    }
+    coordinator = await harness.seed({"living_room": make_room()})
+
+    coordinator.cleanup_orphaned_entities()
+
+    assert fake_registry.removed == []
+
+
+async def test_every_global_entity_declares_a_protected_unique_id(harness: Harness):
+    """The keep set must be the one place a new global entity is registered.
+
+    A global entity whose unique_id is missing from ``GLOBAL_ENTITY_UNIQUE_IDS``
+    is deleted by the orphan cleanup on the next restart, so the two cannot drift.
+    """
+    from custom_components.roommind.binary_sensor import RoomMindWetCoilLockoutBinarySensor
+    from custom_components.roommind.climate import RoomMindHouseClimate
+    from custom_components.roommind.const import GLOBAL_ENTITY_UNIQUE_IDS
+    from custom_components.roommind.sensor import (
+        RoomMindCentralActionSensor,
+        RoomMindHouseTemperatureSensor,
+    )
+    from custom_components.roommind.switch import (
+        RoomMindGlobalClimateControlSwitch,
+        RoomMindVacationSwitch,
+    )
+
+    coordinator = await harness.seed({"living_room": make_room()})
+    global_entities = [
+        entity_class(coordinator)
+        for entity_class in (
+            RoomMindCentralActionSensor,
+            RoomMindHouseTemperatureSensor,
+            RoomMindVacationSwitch,
+            RoomMindGlobalClimateControlSwitch,
+            RoomMindWetCoilLockoutBinarySensor,
+            RoomMindHouseClimate,
+        )
+    ]
+
+    declared = {entity.unique_id for entity in global_entities}
+    assert declared <= GLOBAL_ENTITY_UNIQUE_IDS
+    # …and the keep set must not protect a unique_id no entity declares, or a
+    # renamed entity would silently be swept because the old id stayed behind.
+    assert declared == set(GLOBAL_ENTITY_UNIQUE_IDS)
+
+
 async def test_forgetting_a_room_removes_its_registered_entities(harness: Harness, fake_registry):
     fake_registry.entities = {
         "sensor.mode": SimpleNamespace(

@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, ENTITY_UID_CENTRAL_ACTION, ENTITY_UID_HOUSE_TEMPERATURE
 from .coordinator import RoomMindCoordinator
 from .utils.area_utils import rooms_with_area
 
@@ -134,7 +134,7 @@ class RoomMindCentralActionSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator: RoomMindCoordinator) -> None:
         """Initialize the Central HVAC Action sensor."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_central_action"
+        self._attr_unique_id = ENTITY_UID_CENTRAL_ACTION
         self.entity_id = CENTRAL_ACTION_ENTITY_ID
 
     @property
@@ -177,7 +177,7 @@ class RoomMindHouseTemperatureSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator: RoomMindCoordinator) -> None:
         """Initialize the House Reference Temperature sensor."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_house_temperature"
+        self._attr_unique_id = ENTITY_UID_HOUSE_TEMPERATURE
         self.entity_id = HOUSE_TEMPERATURE_ENTITY_ID
 
     @property

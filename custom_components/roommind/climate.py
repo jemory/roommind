@@ -39,6 +39,7 @@ from .const import (
     DEFAULT_ECO_COOL,
     DEFAULT_ECO_HEAT,
     DOMAIN,
+    ENTITY_UID_HOUSE_CLIMATE,
     MAX_TARGET_TEMP,
     MIN_TARGET_TEMP,
     MODE_CIRCULATING,
@@ -183,7 +184,7 @@ class RoomMindHouseClimate(CoordinatorEntity, ClimateEntity):
 
     _attr_name = "RoomMind House"
     _attr_has_entity_name = False
-    _attr_unique_id = f"{DOMAIN}_house_climate"
+    _attr_unique_id = ENTITY_UID_HOUSE_CLIMATE
     _attr_icon = "mdi:home-thermometer"
     _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_temperature_unit = UnitOfTemperature.CELSIUS

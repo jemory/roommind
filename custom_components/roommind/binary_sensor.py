@@ -8,7 +8,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, ENTITY_UID_WET_COIL_LOCKOUT
 from .coordinator import RoomMindCoordinator, _get_area_name, has_air_quality_sensor
 from .utils.area_utils import rooms_with_area
 
@@ -125,7 +125,7 @@ class RoomMindWetCoilLockoutBinarySensor(CoordinatorEntity, BinarySensorEntity):
     def __init__(self, coordinator: RoomMindCoordinator) -> None:
         """Initialize the Wet Coil Circulation Lockout binary sensor."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_wet_coil_lockout"
+        self._attr_unique_id = ENTITY_UID_WET_COIL_LOCKOUT
         self.entity_id = f"binary_sensor.{DOMAIN}_wet_coil_lockout"
 
     @property

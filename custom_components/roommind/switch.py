@@ -11,7 +11,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, VACATION_SENTINEL_UNTIL
+from .const import (
+    DOMAIN,
+    ENTITY_UID_GLOBAL_CLIMATE_CONTROL,
+    ENTITY_UID_VACATION,
+    VACATION_SENTINEL_UNTIL,
+)
 from .coordinator import RoomMindCoordinator
 from .utils.area_utils import rooms_with_area
 
@@ -118,7 +123,7 @@ class RoomMindVacationSwitch(CoordinatorEntity, SwitchEntity):
 
     def __init__(self, coordinator: RoomMindCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_vacation"
+        self._attr_unique_id = ENTITY_UID_VACATION
         self._attr_name = "Vacation Mode"
         self._attr_icon = "mdi:beach"
         self.entity_id = f"switch.{DOMAIN}_vacation"
@@ -158,7 +163,7 @@ class RoomMindGlobalClimateControlSwitch(CoordinatorEntity, SwitchEntity):
 
     def __init__(self, coordinator: RoomMindCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_climate_control"
+        self._attr_unique_id = ENTITY_UID_GLOBAL_CLIMATE_CONTROL
         self._attr_name = "RoomMind Climate Control"
         self._attr_icon = "mdi:thermostat"
         self.entity_id = f"switch.{DOMAIN}_climate_control"
