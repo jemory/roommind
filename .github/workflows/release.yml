@@ -43,8 +43,16 @@ jobs:
       - name: Create release zip
         run: cd custom_components/roommind && zip -r ../../roommind.zip . -x "__pycache__/*"
 
-      - name: Upload release asset
+      - name: Attach the asset to the tag's release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
-        run: gh release upload "$TAG" roommind.zip --clobber
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" roommind.zip --clobber
+          else
+            # A tag push arrives before the release exists, and `gh release upload`
+            # needs one. Park the asset on a DRAFT so the digest-checking install
+            # path is ready while the notes can still be written before publishing.
+            gh release create "$TAG" roommind.zip --draft --title "$TAG" --generate-notes
+          fi
