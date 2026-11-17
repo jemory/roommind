@@ -1,10 +1,14 @@
 name: Release
 
 on:
+  # Tagging is the release step: pushing a v* tag builds and uploads its asset even
+  # on a fork, where a `release` event is not dispatched to the workflow.
+  push:
+    tags: ["v*"]
   release:
     types: [published]
-  # Forked repositories do not dispatch `release` events until their workflows are
-  # enabled, so the same build can be started by hand for an existing tag:
+  # Kept for re-building an existing tag or repairing a release whose asset is
+  # missing, without cutting a new tag:
   #   gh workflow run release.yml -R <owner>/<repo> -f tag=v3.0.0
   workflow_dispatch:
     inputs:
@@ -21,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
 
       - name: Set up Node
         uses: actions/setup-node@v7.1.0
@@ -42,5 +46,5 @@ jobs:
       - name: Upload release asset
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
         run: gh release upload "$TAG" roommind.zip --clobber
