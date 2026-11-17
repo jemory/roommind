@@ -498,6 +498,47 @@ def _cover_metrics(run: RunData, eid: str, area: str) -> dict[str, Any]:
     }
 
 
+# EKF state layouts found in persisted ``thermal_data``, keyed by vector length:
+# the index of each named parameter. The 9-state layout inserted ``alpha_house``
+# at 2 and ``beta_fan`` at 5, shifting every rate after them, so reading a vector
+# with fixed offsets silently reports the wrong parameters. Earlier layouts are
+# kept because a stored run can be re-evaluated long after it was recorded.
+EKF_LAYOUTS: dict[int, dict[str, int]] = {
+    5: {"alpha_out": 1, "beta_h": 2, "beta_c": 3, "beta_s": 4},
+    6: {"alpha_out": 1, "beta_h": 2, "beta_c": 3, "beta_s": 4, "beta_o": 5},
+    7: {"alpha_out": 1, "beta_h": 2, "beta_c": 3, "beta_s": 4, "beta_o": 5, "beta_f": 6},
+    9: {
+        "alpha_out": 1,
+        "alpha_house": 2,
+        "beta_h": 3,
+        "beta_c": 4,
+        "beta_fan": 5,
+        "beta_s": 6,
+        "beta_o": 7,
+        "beta_f": 8,
+    },
+}
+
+
+def _learned_parameters(state: object) -> dict[str, float]:
+    """Named EKF parameters from a persisted state vector, whatever layout it has.
+
+    An unknown length yields no parameters at all rather than guesses: the metric
+    expectations then report "no value", which is honest, instead of comparing a
+    rate against the wrong state.
+    """
+    if not isinstance(state, list):
+        return {}
+    layout = EKF_LAYOUTS.get(len(state))
+    if layout is None:
+        return {}
+    return {name: float(state[index]) for name, index in layout.items() if isinstance(state[index], int | float)}
+
+
+def _rounded(value: float | None, digits: int = 3) -> float | None:
+    return None if value is None else round(value, digits)
+
+
 def _model_metrics(run: RunData) -> dict[str, Any]:
     """RoomMind's learned EKF parameters next to the simulation's lumped ground truth."""
     from ..physics.zone import ZoneParams
@@ -507,14 +548,16 @@ def _model_metrics(run: RunData) -> dict[str, Any]:
     for area, room in run.scenario.rooms.items():
         truth = ZoneParams.from_thermal(room.thermal, sum(w.area_m2 for w in room.windows)).equivalent_first_order()
         learned = thermal.get(area) or {}
-        x = learned.get("x") or []
+        params = _learned_parameters(learned.get("x"))
         beta_s = _truth_beta_s(run, area, truth["capacity_j_k"])
         beta_h = _truth_beta_device(run, area, truth["capacity_j_k"], "heating")
         beta_c = _truth_beta_device(run, area, truth["capacity_j_k"], "cooling")
+        learned_h = params.get("beta_h")
+        learned_c = params.get("beta_c")
         # learned / truth: the expectation form for heating and cooling rates
         ratio = {
-            key: round(x[i] / truth_val, 2) if len(x) > i and truth_val else None
-            for key, i, truth_val in (("beta_h_ratio", 2, beta_h), ("beta_c_ratio", 3, beta_c))
+            "beta_h_ratio": round(learned_h / beta_h, 2) if learned_h is not None and beta_h else None,
+            "beta_c_ratio": round(learned_c / beta_c, 2) if learned_c is not None and beta_c else None,
         }
         out[area] = {
             "truth_alpha_per_h": round(truth["alpha_per_h"], 4),
@@ -522,10 +565,13 @@ def _model_metrics(run: RunData) -> dict[str, Any]:
             "truth_beta_s": round(beta_s, 3) if beta_s is not None else None,
             "truth_beta_h": round(beta_h, 3) if beta_h is not None else None,
             "truth_beta_c": round(beta_c, 3) if beta_c is not None else None,
-            "learned_alpha_per_h": round(x[1], 4) if len(x) > 1 else None,
-            "learned_beta_h": round(x[2], 3) if len(x) > 2 else None,
-            "learned_beta_c": round(x[3], 3) if len(x) > 3 else None,
-            "learned_beta_s": round(x[4], 3) if len(x) > 4 else None,
+            "learned_alpha_per_h": _rounded(params.get("alpha_out"), 4),
+            "learned_alpha_house_per_h": _rounded(params.get("alpha_house"), 4),
+            "learned_beta_h": _rounded(learned_h),
+            "learned_beta_c": _rounded(learned_c),
+            "learned_beta_fan": _rounded(params.get("beta_fan")),
+            "learned_beta_s": _rounded(params.get("beta_s")),
+            "ekf_states": len(learned.get("x") or ()),
             **ratio,
             "n_updates": learned.get("n_updates"),
         }
@@ -558,6 +604,11 @@ def _truth_beta_s(run: RunData, area: str, capacity_j_k: float) -> float | None:
 
     Uses the simulation's GHI; RoomMind estimates its own from cloud cover, so expect
     some ten percent difference even for a perfect filter.
+
+    The reference plane is horizontal, so this is only comparable with a learned
+    ``beta_s`` for a room that declares no ``solar_azimuths``. A room fitted against
+    plane-of-array irradiance on its own facade learns a gain in those units, and the
+    ratio to this truth is meaningless — assert on ``prediction_mae_30m`` instead.
     """
     sxy = sxx = 0.0
     for s in run.samples:

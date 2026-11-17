@@ -360,3 +360,69 @@ def test_restarts_within_ten_minutes_of_a_stop_are_counted():
     m = _device_metrics(run_data, "climate.d", 24.0)
     assert m["commanded_runs"] == 3
     assert m["restarts_10min"] == 1
+
+
+def _model_run(state: list[float]) -> RunData:
+    """A run whose stored EKF state vector is *state*, for one room 'r'."""
+    scn = load_scenario_dict(scenario({"r": {}}))
+    t0 = scn.start
+    samples = [
+        {"t": t0 + 3600 * i, "outdoor": {"ghi": 0.0}, "rooms": {"r": {"t_air": 20.0}}} for i in range(3)
+    ]
+    return RunData(
+        None,  # type: ignore[arg-type]
+        scn,
+        samples,
+        [],
+        [],
+        t0 + 3600 * 3,
+        {"thermal_data": {"r": {"x": state, "n_updates": 42}}},
+    )
+
+
+def test_model_metrics_read_each_parameter_from_its_own_state_slot():
+    """The 9-state EKF puts alpha_house at 2 and beta_fan at 5, shifting every rate.
+
+    Reading a 9-state vector with the old 7-state offsets reported beta_c as
+    beta_s and alpha_house as beta_h, which made several scenario expectations
+    compare a rate against the wrong parameter (and fail).
+    """
+    from roommind_sim.analysis.metrics import _model_metrics
+
+    state = [21.0, 0.12, 0.30, 4.5, 3.2, 0.9, 1.7, 0.4, 0.2]
+    metrics = _model_metrics(_model_run(state))["r"]
+
+    assert metrics["learned_alpha_per_h"] == pytest.approx(0.12)
+    assert metrics["learned_alpha_house_per_h"] == pytest.approx(0.30)
+    assert metrics["learned_beta_h"] == pytest.approx(4.5)
+    assert metrics["learned_beta_c"] == pytest.approx(3.2)
+    assert metrics["learned_beta_fan"] == pytest.approx(0.9)
+    assert metrics["learned_beta_s"] == pytest.approx(1.7)
+    assert metrics["ekf_states"] == 9
+
+
+def test_model_metrics_read_a_legacy_seven_state_vector():
+    """A run recorded before 9 states keeps its own order: no alpha_house, no beta_fan."""
+    from roommind_sim.analysis.metrics import _model_metrics
+
+    metrics = _model_metrics(_model_run([21.0, 0.12, 4.5, 3.2, 1.7, 0.4, 0.2]))["r"]
+
+    assert metrics["learned_alpha_per_h"] == pytest.approx(0.12)
+    assert metrics["learned_beta_h"] == pytest.approx(4.5)
+    assert metrics["learned_beta_c"] == pytest.approx(3.2)
+    assert metrics["learned_beta_s"] == pytest.approx(1.7)
+    assert metrics["learned_alpha_house_per_h"] is None
+    assert metrics["learned_beta_fan"] is None
+    assert metrics["ekf_states"] == 7
+
+
+def test_model_metrics_refuse_an_unknown_state_layout():
+    """An unrecognised length must report nothing rather than compare the wrong slot."""
+    from roommind_sim.analysis.metrics import _model_metrics
+
+    metrics = _model_metrics(_model_run([21.0, 0.12, 0.30, 4.5, 3.2, 0.9, 1.7, 0.4]))["r"]
+
+    assert metrics["learned_alpha_per_h"] is None
+    assert metrics["learned_beta_h"] is None
+    assert metrics["learned_beta_s"] is None
+    assert metrics["ekf_states"] == 8
