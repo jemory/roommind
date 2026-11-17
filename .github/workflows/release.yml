@@ -1,14 +1,18 @@
 name: Release
 
 on:
-  # Tagging is the release step: pushing a v* tag builds and uploads its asset even
-  # on a fork, where a `release` event is not dispatched to the workflow.
+  # `push: tags` is the arrangement this workflow wants, but it does NOT fire on
+  # this repository: deleting and re-pushing a tag, and pushing a fresh one, both
+  # left the API with zero push runs while `workflow_dispatch` ran normally, and
+  # publishing a release dispatches nothing here because this is a fork. Kept
+  # because it is correct for any repository where it does fire; the supported
+  # path is `dev/release`, which tags, dispatches and publishes in one step.
   push:
     tags: ["v*"]
   release:
     types: [published]
-  # Kept for re-building an existing tag or repairing a release whose asset is
-  # missing, without cutting a new tag:
+  # The path that works: dev/release calls this, and it can be run by hand to
+  # rebuild an existing tag or repair a release whose asset is missing:
   #   gh workflow run release.yml -R <owner>/<repo> -f tag=v3.0.0
   workflow_dispatch:
     inputs:

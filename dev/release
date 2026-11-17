@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Cut a release: tag, push, build the asset, publish.
+#
+# Usage: dev/release <version> [--title "…"] [--notes FILE] [--dry-run] [--skip-checks]
+#
+#   <version>      without the leading v, e.g. 3.0.5. VERSION in const.py and the
+#                  version in manifest.json must both already say it.
+#   --title "…"    release title; defaults to the tag.
+#   --notes FILE   Markdown to publish as the release body. Without it the build
+#                  leaves a DRAFT release with the asset attached and the notes
+#                  still to be written.
+#   --dry-run      do everything except tag, push and publish.
+#   --skip-checks  skip the local `dev/check --quick` gate.
+#
+# Why this exists: the workflow carries `on: push: tags`, but that trigger does
+# not fire on this repository — verified by deleting and re-pushing a tag, and by
+# pushing a fresh one, with zero push runs recorded by the API while
+# workflow_dispatch runs normally. Publishing a GitHub release does not dispatch
+# either, because this is a fork. So the build is started explicitly here, and
+# this script is the supported path. See .github/workflows/release.yml.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+GH="${GH:-gh}"
+
+die() { echo "dev/release: $*" >&2; exit 1; }
+
+version=""
+title=""
+notes=""
+dry_run=0
+skip_checks=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --title) title="${2:-}"; shift 2 ;;
+    --notes) notes="${2:-}"; shift 2 ;;
+    --dry-run) dry_run=1; shift ;;
+    --skip-checks) skip_checks=1; shift ;;
+    -h | --help) awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
+    -*) die "unknown option $1" ;;
+    *)
+      [[ -n "$version" ]] && die "version given twice"
+      version="$1"; shift ;;
+  esac
+done
+
+[[ -n "$version" ]] || die "usage: dev/release <version> [--title …] [--notes FILE] [--dry-run]"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must look like 3.0.5, got '$version'"
+
+tag="v$version"
+repo="$($GH repo view --json nameWithOwner -q .nameWithOwner)"
+
+# -- pre-flight ---------------------------------------------------------------
+[[ -z "$(git status --porcelain)" ]] || die "working tree is dirty; commit or stash first"
+
+const_version="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' custom_components/roommind/const.py)"
+manifest_version="$(sed -n 's/.*"version": "\(.*\)",*/\1/p' custom_components/roommind/manifest.json)"
+[[ "$const_version" == "$version" ]] || die "const.py VERSION is '$const_version', expected '$version'"
+[[ "$manifest_version" == "$version" ]] || die "manifest.json version is '$manifest_version', expected '$version'"
+
+git rev-parse -q --verify "refs/tags/$tag" >/dev/null && die "tag $tag already exists locally"
+if git ls-remote --tags --exit-code origin "$tag" >/dev/null 2>&1; then
+  die "tag $tag already exists on origin"
+fi
+
+if [[ -n "$notes" ]]; then
+  [[ -f "$notes" ]] || die "notes file not found: $notes"
+fi
+
+[[ -n "$title" ]] || title="$tag"
+
+if [[ $skip_checks -eq 0 ]]; then
+  echo "dev/release: running dev/check --quick"
+  dev/check --quick
+fi
+
+if [[ $dry_run -eq 1 ]]; then
+  echo "dev/release: dry run — would tag $tag on $(git rev-parse --short HEAD) and publish '$title' to $repo"
+  [[ -n "$notes" ]] && echo "dev/release: would publish notes from $notes; otherwise a draft is left for you"
+  exit 0
+fi
+
+# -- tag and build ------------------------------------------------------------
+echo "dev/release: tagging $tag on $(git rev-parse --short HEAD)"
+git tag -a "$tag" -m "RoomMind $version"
+git push origin "$tag"
+
+echo "dev/release: starting the asset build for $tag"
+before="$($GH run list -R "$repo" --workflow release.yml --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
+$GH workflow run release.yml -R "$repo" -f tag="$tag" --ref main
+
+run_id=""
+for _ in $(seq 1 30); do
+  sleep 2
+  run_id="$($GH run list -R "$repo" --workflow release.yml --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
+  [[ -n "$run_id" && "$run_id" != "$before" ]] && break
+done
+[[ -n "$run_id" && "$run_id" != "$before" ]] || die "no workflow run appeared; build it with: gh workflow run release.yml -f tag=$tag"
+
+echo "dev/release: watching run $run_id"
+$GH run watch "$run_id" -R "$repo" --exit-status >/dev/null || die "the build failed: gh run view $run_id -R $repo"
+
+# -- publish ------------------------------------------------------------------
+is_draft="$($GH release view "$tag" -R "$repo" --json isDraft -q .isDraft)"
+assets="$($GH release view "$tag" -R "$repo" --json assets -q '.assets[].name' | tr '\n' ' ')"
+[[ "$assets" == *roommind.zip* ]] || die "the release has no roommind.zip asset (assets: ${assets:-none})"
+
+if [[ -n "$notes" ]]; then
+  echo "dev/release: publishing $tag with notes from $notes"
+  $GH release edit "$tag" -R "$repo" --title "$title" --notes-file "$notes" --draft=false
+elif [[ "$is_draft" == "true" ]]; then
+  echo "dev/release: $tag is a DRAFT with roommind.zip attached — write the notes and publish it:"
+  echo "  gh release edit $tag -R $repo --title \"$title\" --notes-file <file> --draft=false"
+  exit 0
+else
+  echo "dev/release: $tag was already published; the asset has been refreshed"
+fi
+
+echo "dev/release: done — https://github.com/$repo/releases/tag/$tag"
