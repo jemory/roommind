@@ -252,7 +252,12 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
                     "name": "roommind-panel",
                     "embed_iframe": False,
                     "trust_external": False,
-                    "js_url": "/roommind/roommind-panel.js",
+                    # The version query is what makes a browser fetch the new
+                    # panel after an update: the static path is served without
+                    # Cache-Control (cache_headers=False), so a bare URL is
+                    # cached heuristically and an upgraded panel keeps running
+                    # the previous build. The dashboard card already does this.
+                    "js_url": f"/roommind/roommind-panel.js?v={VERSION}",
                 }
             },
         )
