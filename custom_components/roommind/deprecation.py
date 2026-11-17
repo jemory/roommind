@@ -85,7 +85,7 @@ def async_check_deprecated_entities(hass: HomeAssistant) -> None:
         severity=ir.IssueSeverity.WARNING,
         translation_key=DEPRECATED_ENTITIES_ISSUE,
         translation_placeholders={"entities": "\n".join(sorted(lines))},
-        learn_more_url="https://github.com/snazzybean/roommind#room-climate-entity",
+        learn_more_url="https://github.com/jemory/roommind#room-climate-entity",
     )
 
 

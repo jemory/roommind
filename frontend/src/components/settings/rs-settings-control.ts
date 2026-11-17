@@ -11,8 +11,7 @@ import { preheatLeadHours } from "../../utils/constants";
 import { formatHours } from "../../utils/format";
 import "../shared/rs-segmented";
 
-const CONTROL_DOCS_URL =
-  "https://github.com/snazzybean/roommind/blob/main/docs/control-and-devices.md";
+const CONTROL_DOCS_URL = "https://github.com/jemory/roommind/blob/main/docs/control-and-devices.md";
 
 @customElement("rs-settings-control")
 export class RsSettingsControl extends RsSettingsBase {

@@ -30,7 +30,7 @@ if (!w.customCards.some((c) => c.type === "roommind-room-card")) {
       return localize("roomcard.description", uiLanguage());
     },
     preview: true,
-    documentationURL: "https://github.com/snazzybean/roommind#dashboard-card",
+    documentationURL: "https://github.com/jemory/roommind#dashboard-card",
   });
 }
 if (!w.customCards.some((c) => c.type === "roommind-house-card")) {
@@ -43,6 +43,6 @@ if (!w.customCards.some((c) => c.type === "roommind-house-card")) {
       return localize("housecard.description", uiLanguage());
     },
     preview: true,
-    documentationURL: "https://github.com/snazzybean/roommind#dashboard-card",
+    documentationURL: "https://github.com/jemory/roommind#dashboard-card",
   });
 }

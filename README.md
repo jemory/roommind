@@ -4,12 +4,12 @@
 
 **Whole-home predictive Central HVAC control for Home Assistant — one thermostat, every room.**
 
-[![Home Assistant Marketplace](https://img.shields.io/badge/Marketplace-Default-orange.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=snazzybean&repository=roommind&category=integration)
+[![Home Assistant Marketplace](https://img.shields.io/badge/Marketplace-Default-orange.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=jemory&repository=roommind&category=integration)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.5%2B-blue.svg)](https://www.home-assistant.io/)
-[![GitHub Release](https://img.shields.io/github/v/release/snazzybean/roommind)](https://github.com/snazzybean/roommind/releases/latest)
-[![Tests](https://github.com/snazzybean/roommind/actions/workflows/ci.yml/badge.svg)](https://github.com/snazzybean/roommind/actions/workflows/ci.yml)
-![Coverage](https://raw.githubusercontent.com/snazzybean/roommind/python-coverage-comment-action-data/badge.svg)
-[![License](https://img.shields.io/github/license/snazzybean/roommind)](https://github.com/snazzybean/roommind/blob/main/LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/jemory/roommind)](https://github.com/jemory/roommind/releases/latest)
+[![Tests](https://github.com/jemory/roommind/actions/workflows/ci.yml/badge.svg)](https://github.com/jemory/roommind/actions/workflows/ci.yml)
+![Coverage](https://raw.githubusercontent.com/jemory/roommind/python-coverage-comment-action-data/badge.svg)
+[![License](https://img.shields.io/github/license/jemory/roommind)](https://github.com/jemory/roommind/blob/main/LICENSE)
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20RoomMind-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/Y8Y31VP2VK)
 
 <img src="docs/images/roommind-2.0-preview.gif" alt="RoomMind panel: room overview, room page, schedule editor and analytics" width="900">
@@ -84,7 +84,7 @@ Every feature in detail: [docs/features.md](docs/features.md). Configuring the t
 
 ## Installation
 
-[![Open your Home Assistant instance and open RoomMind in the Marketplace.](https://my.home-assistant.io/redirect/hacs_repository/?owner=snazzybean&repository=roommind&category=integration)](https://my.home-assistant.io/redirect/hacs_repository/?owner=snazzybean&repository=roommind&category=integration)
+[![Open your Home Assistant instance and open RoomMind in the Marketplace.](https://my.home-assistant.io/redirect/hacs_repository/?owner=jemory&repository=roommind&category=integration)](https://my.home-assistant.io/redirect/hacs_repository/?owner=jemory&repository=roommind&category=integration)
 
 1. Open the **Marketplace** in Home Assistant (formerly HACS), search for **RoomMind** and install it
 2. Restart Home Assistant
@@ -344,10 +344,10 @@ No cloud services, no account: everything runs locally.
 
 ## Feedback & Contributing
 
-- 🐛 **Bug reports**: [Open an issue](https://github.com/snazzybean/roommind/issues/new?template=bug_report.yml)
-- 💡 **Feature requests & ideas**: [Post in Discussions](https://github.com/snazzybean/roommind/discussions/categories/feature-requests) so the community can vote and discuss
-- 🙋 **Questions & usage help**: [Ask in Q&A](https://github.com/snazzybean/roommind/discussions/categories/q-a)
-- 📣 **Announcements**: [Follow Announcements](https://github.com/snazzybean/roommind/discussions/categories/announcements)
+- 🐛 **Bug reports**: [Open an issue](https://github.com/jemory/roommind/issues/new?template=bug_report.yml)
+- 💡 **Feature requests & ideas**: [Post in Discussions](https://github.com/jemory/roommind/discussions/categories/feature-requests) so the community can vote and discuss
+- 🙋 **Questions & usage help**: [Ask in Q&A](https://github.com/jemory/roommind/discussions/categories/q-a)
+- 📣 **Announcements**: [Follow Announcements](https://github.com/jemory/roommind/discussions/categories/announcements)
 
 If RoomMind keeps your home comfortable, you can support its development:
 

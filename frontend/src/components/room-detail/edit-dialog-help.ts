@@ -105,7 +105,7 @@ export function scheduleHelp(lang: string) {
   </div>`;
 }
 
-const MODES_DOCS_URL = "https://github.com/snazzybean/roommind#full-control-vs-managed-mode";
+const MODES_DOCS_URL = "https://github.com/jemory/roommind#full-control-vs-managed-mode";
 
 export function sensorsHelp(lang: string) {
   return html`<div slot="info">
