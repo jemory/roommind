@@ -717,26 +717,11 @@ export function buildChartSeries(
     tooltip: { show: false },
     z: -2,
   };
-  // Open windows and "now" run through every panel; placeOnPanels drops those not shown
+  // Open windows and "now" run through every panel; placeOnPanels drops those not shown.
+  // Circulation is drawn once, on the temperature plot: it is pushed above without a
+  // `panel`, so a copy per panel only duplicated the series and its legend entry.
   for (const panel of SUB_PANEL_ORDER) {
     if (!series.some((s) => s.panel === panel)) continue;
-    if (hasCirculating) {
-      series.push({
-        id: "circulating_events",
-        type: "line",
-        name: localize("analytics.circulating_period", l),
-        color: colors.neutral,
-        data: circulatingBandData,
-        showSymbol: false,
-        lineStyle: { width: 0 },
-        areaStyle: { color: colors.neutral, opacity: 0.18, origin: "start" },
-        tooltip: { show: false },
-        yAxisIndex: 0,
-        z: -1,
-        connectNulls: false,
-      });
-    }
-
     if (hasWindow) {
       series.push({
         ...series.find((s) => s.id === "window_events"),

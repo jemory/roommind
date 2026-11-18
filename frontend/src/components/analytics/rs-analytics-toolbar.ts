@@ -5,7 +5,7 @@
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { HomeAssistant, RoomConfig, AnalyticsData } from "../../types";
-import { localize } from "../../utils/localize";
+import { localize, type TranslationKey } from "../../utils/localize";
 import { formatTempLocale } from "../../utils/temperature";
 import {
   QUICK_RANGE_DAYS,
@@ -20,6 +20,7 @@ import {
 } from "../../utils/analytics-time";
 import { buildCsvString, downloadString, buildExportFilename } from "../../utils/analytics-export";
 import { copyToClipboard } from "../../utils/clipboard";
+import { showToast } from "../../utils/toast";
 import { tokens } from "../../styles/tokens";
 import type { ChipItem } from "../shared/rs-chip-group";
 import type { RsSegmentOption } from "../shared/rs-segmented";
@@ -199,15 +200,20 @@ export class RsAnalyticsToolbar extends LitElement {
         this._exportCsv();
         break;
       case "csv-copy":
-        this._copyCsv();
+        void this._copyCsv();
         break;
       case "diag-download":
-        this._diagnostics((json) =>
-          downloadString(json, "roommind_diagnostics.json", "application/json"),
+        void this._diagnostics((json) =>
+          this._report(
+            downloadString(json, "roommind_diagnostics.json", "application/json"),
+            "analytics.export_blocked",
+          ),
         );
         break;
       case "diag-copy":
-        this._diagnostics((json) => copyToClipboard(json));
+        void this._diagnostics(async (json) => {
+          this._report(await copyToClipboard(json), "analytics.copy_blocked");
+        });
         break;
     }
   }
@@ -224,26 +230,35 @@ export class RsAnalyticsToolbar extends LitElement {
       "",
       "csv",
     );
-    downloadString(csv, filename, "text/csv");
+    this._report(downloadString(csv, filename, "text/csv"), "analytics.export_blocked");
   }
 
-  private _copyCsv() {
+  private async _copyCsv() {
     const csv = this.data ? buildCsvString(this.data) : null;
-    if (csv) copyToClipboard(csv);
+    if (csv) this._report(await copyToClipboard(csv), "analytics.copy_blocked");
+  }
+
+  /** Say something when the browser refused the action: doing nothing reads as a broken button. */
+  private _report(ok: boolean, messageKey: TranslationKey) {
+    if (ok) return;
+    const l = this.hass.language;
+    showToast(this, localize(messageKey, l), l);
   }
 
   /** The whole integration's diagnostics, not the room's; one request at a time. */
-  private async _diagnostics(use: (json: string) => void) {
+  private async _diagnostics(use: (json: string) => void | Promise<void>) {
     if (this._diagLoading) return;
     this._diagLoading = true;
+    const l = this.hass.language;
     try {
       const result = await this.hass.callWS<Record<string, unknown>>({
         type: "roommind/diagnostics/get",
       });
-      use(JSON.stringify(result, null, 2));
+      await use(JSON.stringify(result, null, 2));
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("[RoomMind] diagnostics export failed:", err);
+      showToast(this, localize("analytics.diag_failed", l), l);
     } finally {
       this._diagLoading = false;
     }

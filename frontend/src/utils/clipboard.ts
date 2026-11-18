@@ -1,13 +1,20 @@
 /**
- * Clipboard utilities with fallback for non-HTTPS contexts.
+ * Clipboard utilities with a fallback for non-HTTPS and embedded contexts.
+ *
+ * The result is awaited on purpose. `navigator.clipboard.writeText` rejects when the page
+ * runs in an iframe without the `clipboard-write` permission — which is how the panel is
+ * embedded in some shells — and the previous version returned `true` before that rejection
+ * arrived, so a blocked copy looked exactly like a successful one.
  */
 
-export function copyToClipboard(text: string): boolean {
+export async function copyToClipboard(text: string): Promise<boolean> {
   if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text).catch(() => {
-      copyToClipboardFallback(text);
-    });
-    return true;
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Blocked (insecure context or a restrictive iframe): fall through to the textarea.
+    }
   }
   return copyToClipboardFallback(text);
 }

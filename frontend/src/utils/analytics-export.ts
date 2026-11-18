@@ -45,14 +45,33 @@ export function buildCsvString(data: AnalyticsData): string | null {
   return [header, ...rows].join("\n");
 }
 
-export function downloadString(content: string, filename: string, mimeType: string) {
-  const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+/**
+ * Offer `content` as a file download. Returns false only when the browser threw — a
+ * sandboxed iframe without `allow-downloads` blocks the click without throwing, so the
+ * caller still has to say something when nothing appears.
+ *
+ * The anchor is attached to the document before clicking: a detached one is ignored by
+ * some browsers, and the object URL is revoked on a later task because revoking it
+ * synchronously can cancel a download that has not started yet.
+ */
+export function downloadString(content: string, filename: string, mimeType: string): boolean {
+  try {
+    const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    return true;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[RoomMind] download failed:", err);
+    return false;
+  }
 }
 
 export function buildExportFilename(
