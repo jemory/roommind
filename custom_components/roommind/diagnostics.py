@@ -204,11 +204,19 @@ def _build_window_state(coordinator: Any, area_id: str) -> dict[str, Any]:
 
 
 def _build_cover_state(coordinator: Any, area_id: str) -> dict[str, Any] | None:
-    """Build cover manager state for a room."""
-    cm = coordinator._cover_manager
-    if area_id not in cm._states:
+    """Build cover manager state for a room.
+
+    The manager lives on the CoverOrchestrator, not on the coordinator. Reading the old
+    attribute raised AttributeError inside the websocket handler, which HA reported as
+    ``unknown_error`` — the whole export failed, so the panel's buttons did nothing.
+    The chain is defensive so a future move costs this one section, not the export.
+    """
+    orchestrator = getattr(coordinator, "_cover_orchestrator", None)
+    cm = getattr(orchestrator, "_cover_manager", None)
+    states = getattr(cm, "_states", None)
+    if not states or area_id not in states:
         return None
-    cs = cm._states[area_id]
+    cs = states[area_id]
     now = time.time()
     result: dict[str, Any] = {
         "current_position": cs.current_position,

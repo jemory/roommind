@@ -71,7 +71,7 @@ def _make_coordinator(
     coordinator._window_manager._closed_since = window_closed_since or {}
 
     # Cover manager
-    coordinator._cover_manager._states = cover_states or {}
+    coordinator._cover_orchestrator._cover_manager._states = cover_states or {}
 
     # Legacy heat source routing, still reported when the coordinator has it
     coordinator._heat_source_states = heat_source_states or {}

@@ -2319,7 +2319,7 @@ async def test_get_diagnostics_returns_full_structure(ws_hass, store, connection
     coordinator._window_manager = MagicMock()
     coordinator._window_manager._states = {}
     coordinator._cover_orchestrator = MagicMock()
-    coordinator._cover_orchestrator._cover_managers = {}
+    coordinator._cover_orchestrator._cover_manager._states = {}
     coordinator._heat_source_states = {}
     coordinator._weather_manager = MagicMock()
     coordinator._weather_manager._outdoor_forecast = []
