@@ -271,6 +271,34 @@ class TestAllowedActions:
         warm = CentralPlantManager().allowed_actions(settings, "auto", 25.0, {}, now_ts=1000)
         assert MODE_HEATING not in warm.legal_actions
 
+    def test_the_global_settings_supply_the_outdoor_limits(self) -> None:
+        """The panel saves the limits in the global settings, not the plant block.
+
+        Reading only the plant block pinned both to their defaults, so a Caller who
+        lowered the cooling floor still had cooling withheld above it.
+        """
+        state = CentralPlantManager().allowed_actions({}, "auto", 12.0, {"outdoor_cooling_min": 10.0}, now_ts=1000)
+        assert MODE_COOLING in state.legal_actions
+        assert state.outdoor_blocked == ()
+
+    def test_the_outdoor_lockout_reports_the_direction_it_withheld(self) -> None:
+        state = CentralPlantManager().allowed_actions({}, "auto", 10.0, {}, now_ts=1000)
+        assert state.outdoor_blocked == (MODE_COOLING,)
+        # A standing weather limit, not an equipment protection: the Guard chip
+        # keeps meaning "the plant is waiting something out".
+        assert state.guard_active is False
+        assert state.guard_reason is None
+
+    def test_a_mode_restriction_is_not_blamed_on_the_outdoor_lockout(self) -> None:
+        state = CentralPlantManager().allowed_actions({}, "heat_only", 10.0, {}, now_ts=1000)
+        assert MODE_COOLING not in state.legal_actions
+        assert state.outdoor_blocked == ()
+
+    def test_an_override_lifts_the_outdoor_lockout_report(self) -> None:
+        state = CentralPlantManager().allowed_actions({}, "auto", 10.0, {}, any_override=True, now_ts=1000)
+        assert MODE_COOLING in state.legal_actions
+        assert state.outdoor_blocked == ()
+
     def test_wet_coil_lockout_drops_circulation(self) -> None:
         state = CentralPlantManager().allowed_actions({}, "auto", None, {}, wet_coil_locked=True, now_ts=1000)
         assert MODE_CIRCULATING not in state.legal_actions

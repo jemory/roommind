@@ -1127,6 +1127,7 @@
   "plant.guard.wet_coil": "nasses Register",
   "plant.chip.wet_coil": "Nassregister-Sperre",
   "plant.chip.guard": "Schutz",
+  "plant.chip.outdoor_blocked": "{action} gesperrt · {temp} außen",
   "plant.chip.exterior": "{count} Raum/Räume pausiert",
   "plant.chip.override": "Thermostat-Override",
   "plant.clear_override": "Override aufheben",

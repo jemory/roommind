@@ -521,6 +521,18 @@ export class RsDashboard extends LitElement {
     pausedRooms: string[],
   ) {
     const l = this.hass.language;
+    // A standing outdoor limit, so it stays out of the Guard chip: "cooling is off
+    // because it is 51 °F outside" is a state of the weather, not a fault.
+    const blockedDirections = p.outdoor_blocked ?? [];
+    const blockedChip =
+      blockedDirections.length && p.outdoor_temp != null
+        ? html`<rs-pill icon="mdi:thermometer-off"
+            >${localize("plant.chip.outdoor_blocked", l, {
+              action: blockedDirections.map((a) => localize(ACTION_KEYS[a], l)).join(", "),
+              temp: `${formatTempLocale(p.outdoor_temp, this.hass, 0, 1)} ${tempUnit(this.hass)}`,
+            })}</rs-pill
+          >`
+        : nothing;
     const chips = [
       p.wet_coil_locked
         ? html`<rs-pill icon="mdi:water-alert" tone="warn"
@@ -534,6 +546,7 @@ export class RsDashboard extends LitElement {
             }</rs-pill
           >`
         : nothing,
+      blockedChip,
       pausedRooms.length
         ? html`<rs-pill icon="mdi:window-open-variant" tone="warn"
             >${localize("plant.chip.exterior", l, { count: pausedRooms.length })}</rs-pill

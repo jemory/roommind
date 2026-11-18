@@ -1127,6 +1127,7 @@
   "plant.guard.wet_coil": "wet coil",
   "plant.chip.wet_coil": "Wet-coil lockout",
   "plant.chip.guard": "Guard",
+  "plant.chip.outdoor_blocked": "{action} blocked · {temp} outside",
   "plant.chip.exterior": "{count} room(s) paused",
   "plant.chip.override": "Thermostat override",
   "plant.clear_override": "Clear override",

@@ -21,6 +21,8 @@ from typing import Any
 from ..const import (
     CLIMATE_MODE_COOL_ONLY,
     CLIMATE_MODE_HEAT_ONLY,
+    DEFAULT_OUTDOOR_COOLING_MIN,
+    DEFAULT_OUTDOOR_HEATING_MAX,
     MODE_COOLING,
     MODE_HEATING,
     MODE_IDLE,
@@ -60,6 +62,21 @@ def _as_timestamp(value: Any) -> float | None:
         return None
 
 
+def _outdoor_limit(settings: dict[str, Any], plant_settings: dict[str, Any], key: str, default: float) -> float:
+    """Resolve one outdoor lockout: global settings, then the plant block, then the default.
+
+    The panel saves ``outdoor_cooling_min``/``outdoor_heating_max`` in the global
+    settings, so reading only the Central Plant block pinned both limits to their
+    defaults and silently ignored whatever the Caller configured. The plant block
+    stays a fallback for data stored by builds that kept them there.
+    """
+    for source in (settings, plant_settings):
+        value = source.get(key)
+        if value is not None:
+            return _as_float(value, default)
+    return default
+
+
 @dataclass
 class ExteriorGateResult:
     """Outcome of the Whole-Home Exterior Opening Gate."""
@@ -77,6 +94,11 @@ class PlantGuardState:
     guard_active: bool
     guard_reason: str | None
     guard_until: float | None
+    #: Conditioning directions the outdoor-temperature lockout withheld this cycle.
+    #: Reported separately from ``guard_reason``: the lockout is a standing policy
+    #: limit, not an equipment protection the plant is waiting out, so it must not
+    #: raise the Guard chip while the plant is busy doing something else.
+    outdoor_blocked: tuple[str, ...] = ()
 
 
 class CentralPlantManager:
@@ -256,12 +278,21 @@ class CentralPlantManager:
         can_heat = climate_mode != CLIMATE_MODE_COOL_ONLY
         can_cool = climate_mode != CLIMATE_MODE_HEAT_ONLY
 
+        outdoor_blocked: list[str] = []
         if outdoor_temp is not None and not any_override:
-            outdoor_cooling_min = _as_float(plant_settings.get("outdoor_cooling_min", 16), 16.0)
-            outdoor_heating_max = _as_float(plant_settings.get("outdoor_heating_max", 22), 22.0)
+            outdoor_cooling_min = _outdoor_limit(
+                settings, plant_settings, "outdoor_cooling_min", DEFAULT_OUTDOOR_COOLING_MIN
+            )
+            outdoor_heating_max = _outdoor_limit(
+                settings, plant_settings, "outdoor_heating_max", DEFAULT_OUTDOOR_HEATING_MAX
+            )
             if outdoor_temp < outdoor_cooling_min:
+                if can_cool:
+                    outdoor_blocked.append(MODE_COOLING)
                 can_cool = False
             if outdoor_temp > outdoor_heating_max:
+                if can_heat:
+                    outdoor_blocked.append(MODE_HEATING)
                 can_heat = False
 
         legal: set[str] = {MODE_IDLE, MODE_CIRCULATING}
@@ -354,7 +385,7 @@ class CentralPlantManager:
                     guard_reason = GUARD_CHANGEOVER
                     guard_until = cool_until
 
-        return PlantGuardState(legal, None, guard_active, guard_reason, guard_until)
+        return PlantGuardState(legal, None, guard_active, guard_reason, guard_until, tuple(outdoor_blocked))
 
     # ------------------------------------------------------------------ #
     # Command bookkeeping

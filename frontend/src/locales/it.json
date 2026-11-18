@@ -1127,6 +1127,7 @@
   "plant.guard.wet_coil": "batteria bagnata",
   "plant.chip.wet_coil": "Blocco batteria bagnata",
   "plant.chip.guard": "Protezione",
+  "plant.chip.outdoor_blocked": "{action} bloccato · {temp} fuori",
   "plant.chip.exterior": "{count} stanza/e in pausa",
   "plant.chip.override": "Override termostato",
   "plant.clear_override": "Rimuovi override",

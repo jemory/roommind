@@ -208,7 +208,7 @@ Shades are decided for the whole home, not per device: RoomMind lowers covers be
 | Entity | Description |
 |--------|-------------|
 | `climate.roommind_{area_id}` | The room as one thermostat, see [Room climate entity](#room-climate-entity) |
-| `sensor.roommind_central_action` | What the plant is doing: `idle`, `heating`, `cooling` or `circulating`, with the driving rooms, decision reason and active guards as attributes |
+| `sensor.roommind_central_action` | What the plant is doing: `idle`, `heating`, `cooling` or `circulating`, with the driving rooms, decision reason, legal actions, active guards, overrides and any outdoor lockout as attributes |
 | `sensor.roommind_house_temperature` | The House Reference Temperature the plan works against |
 | `binary_sensor.roommind_wet_coil_lockout` | On while Wet-Coil Lockout holds Circulation after a cooling run |
 | `climate.roommind_house` | The house as one thermostat, see [House climate entity](#house-climate-entity) |

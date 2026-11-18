@@ -282,6 +282,45 @@ async def test_the_guard_state_reports_why_it_holds(harness: Harness, fake_state
     assert data["central_plant"]["guard_until"] > time.time()
 
 
+async def test_the_configured_cooling_floor_lets_a_cold_outside_cool(harness: Harness, fake_states):
+    """The panel's "No cooling below" setting has to reach the plant guard.
+
+    It is saved in the global settings, but the guard read only the Central Plant
+    block and silently pinned the floor to its 16 °C default: a house left too warm
+    on a 12 °C evening was never cooled, and nothing on the dashboard said why.
+    """
+    fake_states.set("sensor.room_temp", "26.0", {"unit_of_measurement": "°C"})
+    fake_states.set("sensor.outdoor_temp", "12.0", {"unit_of_measurement": "°C"})
+    await harness.seed(
+        {"living_room": make_room({"comfort_cool": 22.0})},
+        settings={"outdoor_cooling_min": 10.0},
+    )
+
+    data = await harness.cycle()
+
+    live = data["central_plant"]
+    assert "cooling" in live["legal_actions"]
+    assert live["outdoor_blocked"] == []
+    assert live["action"] == MODE_COOLING
+
+
+async def test_a_cold_outside_reports_why_cooling_is_withheld(harness: Harness, fake_states):
+    """Idle on a cold evening is not a mystery: the withheld direction is published."""
+    fake_states.set("sensor.room_temp", "26.0", {"unit_of_measurement": "°C"})
+    fake_states.set("sensor.outdoor_temp", "12.0", {"unit_of_measurement": "°C"})
+    await harness.seed({"living_room": make_room({"comfort_cool": 22.0})})
+
+    data = await harness.cycle()
+
+    live = data["central_plant"]
+    assert live["action"] == MODE_IDLE
+    assert "cooling" not in live["legal_actions"]
+    assert live["outdoor_blocked"] == [MODE_COOLING]
+    # The outdoor floor is a standing weather limit, so the Guard chip stays off.
+    assert live["guard_active"] is False
+    assert live["guard_reason"] is None
+
+
 async def test_the_circulating_min_fan_guard_holds_the_blower(harness: Harness):
     coordinator = await harness.seed({"living_room": make_room()})
     skip_learned_load(coordinator)

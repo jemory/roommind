@@ -145,7 +145,18 @@ class RoomMindCentralActionSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict:
-        """Expose the decision behind the action for the panel and automations."""
+        """Expose the decision behind the action for the panel and automations.
+
+        ``legal_actions``, ``outdoor_temp_c`` and ``all_force_off`` are the inputs the
+        controller actually chose from. Without them an idle plant looked identical
+        whatever withheld the action. The temperature keeps the ``_c`` suffix the
+        other Celsius attributes use, because attributes are never unit-converted.
+
+        ``plant_override_active`` is a setpoint changed on the wall thermostat itself;
+        ``any_override`` also covers a temporary temperature set on a room. Both lift
+        the outdoor lockout, so the wider one has to be readable on its own: the
+        narrower flag stayed false while a room override was what unblocked cooling.
+        """
         plant = _central_plant_data(self.coordinator)
         return {
             # The controller publishes the commanded action as "action"; older shapes differ
@@ -156,7 +167,12 @@ class RoomMindCentralActionSensor(CoordinatorEntity, SensorEntity):
             "guard_reason": plant.get("guard_reason"),
             "wet_coil_locked": bool(plant.get("wet_coil_locked", False)),
             "exterior_paused_rooms": plant.get("exterior_paused_rooms", plant.get("blocking_rooms", [])),
-            "plant_override_active": bool(plant.get("plant_override_active", plant.get("any_override", False))),
+            "plant_override_active": bool(plant.get("plant_override_active", False)),
+            "any_override": bool(plant.get("any_override", False)),
+            "legal_actions": list(plant.get("legal_actions") or []),
+            "outdoor_blocked": list(plant.get("outdoor_blocked") or []),
+            "outdoor_temp_c": plant.get("outdoor_temp"),
+            "all_force_off": bool(plant.get("all_force_off", False)),
         }
 
 

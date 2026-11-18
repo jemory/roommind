@@ -162,6 +162,8 @@ export interface CentralPlantLive {
   commanded_single: number | null;
   legal_actions?: PlantAction[];
   forced_action?: PlantAction | null;
+  /** Conditioning directions the outdoor-temperature lockout withheld this cycle. */
+  outdoor_blocked?: PlantAction[];
   driving_rooms: string[];
   decision_reason: string;
   guard_active: boolean;

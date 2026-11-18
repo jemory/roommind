@@ -2436,6 +2436,10 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             "commanded_single": actuation.target_temp_single_c if actuation is not None else None,
             "legal_actions": sorted(guard_state.legal_actions),
             "forced_action": guard_state.forced_action,
+            # A standing outdoor-temperature limit, not an equipment protection:
+            # the panel reports it on its own so the Guard chip keeps meaning
+            # "the plant is waiting something out".
+            "outdoor_blocked": list(guard_state.outdoor_blocked),
             "guard_active": guard_state.guard_active,
             "guard_reason": guard_state.guard_reason,
             "guard_until": guard_state.guard_until,

@@ -216,6 +216,11 @@ def test_central_action_sensor_value_and_attributes():
             "wet_coil_locked": False,
             "exterior_paused_rooms": ["kitchen"],
             "plant_override_active": True,
+            "any_override": True,
+            "legal_actions": ["circulating", "cooling", "idle"],
+            "outdoor_blocked": [],
+            "outdoor_temp": 24.5,
+            "all_force_off": False,
         }
     )
     sensor = RoomMindCentralActionSensor(coordinator)
@@ -229,16 +234,52 @@ def test_central_action_sensor_value_and_attributes():
         "wet_coil_locked": False,
         "exterior_paused_rooms": ["kitchen"],
         "plant_override_active": True,
+        "any_override": True,
+        "legal_actions": ["circulating", "cooling", "idle"],
+        "outdoor_blocked": [],
+        "outdoor_temp_c": 24.5,
+        "all_force_off": False,
     }
+
+
+def test_central_action_sensor_explains_an_idle_plant():
+    """An idle plant publishes what withheld the action, so it is not a mystery."""
+    coordinator = _make_coordinator(
+        plant={
+            "action": "idle",
+            "commanded_action": "idle",
+            "decision_reason": "bangbang",
+            "legal_actions": ["circulating", "heating", "idle"],
+            "outdoor_blocked": ["cooling"],
+            "outdoor_temp": 10.5,
+            "all_force_off": False,
+        }
+    )
+    attrs = RoomMindCentralActionSensor(coordinator).extra_state_attributes
+    assert attrs["legal_actions"] == ["circulating", "heating", "idle"]
+    assert attrs["outdoor_blocked"] == ["cooling"]
+    assert attrs["outdoor_temp_c"] == 10.5
+    assert attrs["all_force_off"] is False
 
 
 def test_central_action_sensor_maps_the_coordinator_plant_keys():
     """The coordinator names some decision keys differently; the entity still exposes the contract."""
-    coordinator = _make_coordinator(plant={"action": "heating", "blocking_rooms": ["kitchen"], "any_override": True})
+    coordinator = _make_coordinator(plant={"action": "heating", "blocking_rooms": ["kitchen"]})
     attrs = RoomMindCentralActionSensor(coordinator).extra_state_attributes
     assert attrs["commanded_action"] == "heating"
     assert attrs["exterior_paused_rooms"] == ["kitchen"]
-    assert attrs["plant_override_active"] is True
+
+
+def test_a_room_override_is_not_reported_as_a_thermostat_override():
+    """A temporary room temperature is the wider override, and the one that lifts the outdoor lockout.
+
+    It used to feed the ``plant_override_active`` flag through a fallback, so the
+    attribute read false while a room override was exactly what unblocked cooling.
+    """
+    coordinator = _make_coordinator(plant={"action": "cooling", "any_override": True})
+    attrs = RoomMindCentralActionSensor(coordinator).extra_state_attributes
+    assert attrs["any_override"] is True
+    assert attrs["plant_override_active"] is False
 
 
 def test_central_action_sensor_defaults_to_idle():

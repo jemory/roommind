@@ -1127,6 +1127,7 @@
   "plant.guard.wet_coil": "batterie humide",
   "plant.chip.wet_coil": "Verrouillage batterie humide",
   "plant.chip.guard": "Protection",
+  "plant.chip.outdoor_blocked": "{action} bloqué · {temp} dehors",
   "plant.chip.exterior": "{count} pièce(s) en pause",
   "plant.chip.override": "Dérogation thermostat",
   "plant.clear_override": "Effacer la dérogation",
