@@ -230,9 +230,15 @@ class TestAllowedActions:
         state = CentralPlantManager().allowed_actions({}, "auto", None, {"climate_control_active": False}, now_ts=1000)
         assert state == PlantGuardState({MODE_IDLE}, MODE_IDLE, False, None, None)
 
-    def test_exterior_pause_blocks_everything(self) -> None:
+    def test_exterior_pause_keeps_conditioning_out_but_allows_circulation(self) -> None:
         state = CentralPlantManager().allowed_actions({}, "auto", None, {}, exterior_paused=True, now_ts=1000)
-        assert state == PlantGuardState({MODE_IDLE}, MODE_IDLE, True, "exterior_open", None)
+        assert state == PlantGuardState({MODE_IDLE, MODE_CIRCULATING}, None, True, "exterior_open", None)
+
+    def test_a_wet_coil_keeps_circulation_out_of_an_exterior_pause(self) -> None:
+        state = CentralPlantManager().allowed_actions(
+            {}, "auto", None, {}, exterior_paused=True, wet_coil_locked=True, now_ts=1000
+        )
+        assert state == PlantGuardState({MODE_IDLE}, None, True, "exterior_open", None)
 
     def test_auto_mode_supports_all_actions(self) -> None:
         state = CentralPlantManager().allowed_actions({}, "auto", None, {}, now_ts=1000)

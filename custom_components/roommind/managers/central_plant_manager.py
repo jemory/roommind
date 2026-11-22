@@ -273,7 +273,11 @@ class CentralPlantManager:
             return PlantGuardState({MODE_IDLE}, MODE_IDLE, False, None, None)
 
         if exterior_paused:
-            return PlantGuardState({MODE_IDLE}, MODE_IDLE, True, GUARD_EXTERIOR_OPEN, None)
+            # Heating and cooling stay out, but the blower may still move air along
+            # an open path. The wet coil still forbids circulation: evaporating
+            # moisture off it raises indoor humidity.
+            allowed = {MODE_IDLE} if wet_coil_locked else {MODE_IDLE, MODE_CIRCULATING}
+            return PlantGuardState(allowed, None, True, GUARD_EXTERIOR_OPEN, None)
 
         can_heat = climate_mode != CLIMATE_MODE_COOL_ONLY
         can_cool = climate_mode != CLIMATE_MODE_HEAT_ONLY

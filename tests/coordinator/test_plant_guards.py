@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from custom_components.roommind.const import MODE_COOLING, MODE_HEATING, MODE_IDLE
+from custom_components.roommind.const import MODE_CIRCULATING, MODE_COOLING, MODE_HEATING, MODE_IDLE
 
 from .conftest import DEFAULT_THERMOSTAT_ATTRIBUTES, THERMOSTAT_ENTITY, Harness, make_room
 
@@ -139,6 +139,85 @@ async def test_an_exterior_opening_pauses_the_plant(harness: Harness, fake_state
     assert data["central_plant"]["paused"] is True
     assert data["central_plant"]["guard_reason"] == "exterior_open"
     assert data["central_plant"]["action"] == MODE_IDLE
+
+
+async def test_circulation_runs_through_an_exterior_pause(harness: Harness, fake_states):
+    fake_states.set("sensor.warm_temp", "27.0", {"unit_of_measurement": "°C"})
+    fake_states.set("sensor.cold_temp", "18.0", {"unit_of_measurement": "°C"})
+    fake_states.set("sensor.outdoor_temp", "20.0", {"unit_of_measurement": "°C"})
+    fake_states.set("binary_sensor.window", "on")
+    await harness.seed(
+        {
+            "warm_room": make_room(
+                {
+                    "temperature_sensor": "sensor.warm_temp",
+                    "exterior_window_sensors": ["binary_sensor.window"],
+                    "window_open_delay": 0,
+                }
+            ),
+            "cold_room": make_room({"temperature_sensor": "sensor.cold_temp"}),
+        },
+        settings={"central_plant": {"thermostat_entity": THERMOSTAT_ENTITY, "exterior_open_policy": "pause_always"}},
+    )
+
+    data = await harness.cycle()
+
+    # Two rooms pulling apart: the blower fixes that without conditioning the house.
+    assert data["central_plant"]["paused"] is True
+    assert data["central_plant"]["action"] == MODE_CIRCULATING
+
+
+async def test_a_uniform_warm_house_stays_idle_behind_an_exterior_pause(harness: Harness, fake_states):
+    fake_states.set("sensor.room_temp", "26.0", {"unit_of_measurement": "°C"})
+    fake_states.set("sensor.outdoor_temp", "20.0", {"unit_of_measurement": "°C"})
+    fake_states.set("binary_sensor.window", "on")
+    await harness.seed(
+        {
+            "living_room": make_room(
+                {
+                    "comfort_cool": 22.0,
+                    "exterior_window_sensors": ["binary_sensor.window"],
+                    "window_open_delay": 0,
+                }
+            )
+        },
+        settings={"central_plant": {"thermostat_entity": THERMOSTAT_ENTITY, "exterior_open_policy": "pause_always"}},
+    )
+
+    data = await harness.cycle()
+
+    # Nothing to equalise: circulating would only spend fan energy.
+    assert data["central_plant"]["paused"] is True
+    assert data["central_plant"]["action"] == MODE_IDLE
+
+
+async def test_pause_always_still_allows_circulation_when_the_door_is_closed(harness: Harness, fake_states):
+    fake_states.set("sensor.warm_temp", "27.0", {"unit_of_measurement": "°C"})
+    fake_states.set("sensor.cold_temp", "18.0", {"unit_of_measurement": "°C"})
+    fake_states.set("sensor.outdoor_temp", "20.0", {"unit_of_measurement": "°C"})
+    fake_states.set("binary_sensor.window", "on")
+    fake_states.set("binary_sensor.door", "off")
+    await harness.seed(
+        {
+            "warm_room": make_room(
+                {
+                    "temperature_sensor": "sensor.warm_temp",
+                    "exterior_window_sensors": ["binary_sensor.window"],
+                    "interior_door_sensors": ["binary_sensor.door"],
+                    "interior_door_delay": 0,
+                    "window_open_delay": 0,
+                }
+            ),
+            "cold_room": make_room({"temperature_sensor": "sensor.cold_temp"}),
+        },
+        settings={"central_plant": {"thermostat_entity": THERMOSTAT_ENTITY, "exterior_open_policy": "pause_always"}},
+    )
+
+    data = await harness.cycle()
+
+    # pause_always ignores the closed door, but the rooms that do share air can still mix.
+    assert data["central_plant"]["paused"] is True
+    assert data["central_plant"]["action"] == MODE_CIRCULATING
 
 
 async def test_a_closed_interior_door_keeps_the_pause_policy_local(harness: Harness, fake_states):

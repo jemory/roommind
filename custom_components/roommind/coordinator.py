@@ -93,7 +93,12 @@ from .control.thermal_model import RoomModelManager, regressor_signature
 from .control.thermostat_actuator import ActuationResult, ThermostatActuator
 from .control.topology import RoomGraph, build_room_graph, reference_temperature, reference_weights
 from .managers.air_quality_manager import AirQualityTracker, VentilationController
-from .managers.central_plant_manager import CentralPlantManager, ExteriorGateResult, PlantGuardState
+from .managers.central_plant_manager import (
+    GUARD_EXTERIOR_OPEN,
+    CentralPlantManager,
+    ExteriorGateResult,
+    PlantGuardState,
+)
 from .managers.cover_manager import CoverManager
 from .managers.cover_orchestrator import CoverOrchestrator, CoverResult, HouseCoverContext
 from .managers.ekf_training_manager import EkfTrainingManager
@@ -1389,6 +1394,12 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             estimator = self._model_manager.get_estimator(cycle.area_id)
             estimators[cycle.area_id] = estimator
             priority, occupied = self._occupancy_series(cycle, settings, now, n_blocks)
+            if cycle.window_open and guard_state.guard_reason == GUARD_EXTERIOR_OPEN:
+                # The gate lets Circulation run, and the room behind the opening is one
+                # of the rooms it should even out. Its zero occupancy would otherwise
+                # hide it from the mixing arbitration. Priority stays zero, so it still
+                # cannot drive heating or cooling.
+                occupied = [1.0] * n_blocks
             resolver = make_target_resolver(
                 cycle.schedule_blocks,
                 room,
