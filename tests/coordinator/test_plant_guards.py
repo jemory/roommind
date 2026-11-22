@@ -220,6 +220,31 @@ async def test_pause_always_still_allows_circulation_when_the_door_is_closed(har
     assert data["central_plant"]["action"] == MODE_CIRCULATING
 
 
+async def test_a_window_opening_while_the_furnace_runs_stops_it_that_cycle(harness: Harness, fake_states):
+    fake_states.set("binary_sensor.window", "on")
+    coordinator = await harness.seed(
+        {
+            "living_room": make_room(
+                {
+                    "exterior_window_sensors": ["binary_sensor.window"],
+                    "window_open_delay": 0,
+                }
+            )
+        },
+        settings={"central_plant": {"thermostat_entity": THERMOSTAT_ENTITY, "exterior_open_policy": "pause_always"}},
+    )
+    skip_learned_load(coordinator)
+    coordinator._plant_manager.active_action = MODE_HEATING
+    coordinator._plant_manager.action_started_at = time.time()
+
+    data = await harness.cycle()
+
+    # The gate overrides a run in progress instead of letting it finish its minimum run.
+    assert data["central_plant"]["action"] == MODE_IDLE
+    assert data["central_plant"]["guard_reason"] == "exterior_open"
+    assert data["central_plant"]["forced_action"] is None
+
+
 async def test_a_closed_interior_door_keeps_the_pause_policy_local(harness: Harness, fake_states):
     fake_states.set("binary_sensor.window", "on")
     fake_states.set("binary_sensor.door", "off")
