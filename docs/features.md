@@ -145,7 +145,7 @@ Lockout does not block heating or cooling: a returning call always wins over a c
 
 ### Exterior Openings
 
-A window or exterior door to the outdoors is an **Exterior Opening**. While one is open the plant pauses — heating a house with an open window wastes energy, and cooling one with an open door never reaches its target. The pause starts after the configured open delay and ends after the close delay, with a short grace period so a sensor that flickers does not stop the plant.
+A window or exterior door to the outdoors is an **Exterior Opening**. While one is open, heating and cooling pause — heating a house with an open window wastes energy, and cooling one with an open door never reaches its target. Circulation is still allowed: with an open path through the house the blower is what distributes outdoor air, so it runs whenever mixing the rooms would even them out. The pause starts after the configured open delay and ends after the close delay, with a short grace period so a sensor that flickers does not stop the plant.
 
 After a restart, RoomMind waits until the opening sensors report a state (at most 5 minutes; a sensor that is still unavailable then counts as closed). A sensor that no longer exists at all (deleted or renamed) counts as closed right away once Home Assistant has finished starting, with a warning in the log. A sensor that drops out briefly keeps its last state.
 

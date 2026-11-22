@@ -21,7 +21,7 @@ RoomMind runs the **Central Plant** of a ducted forced-air home from Home Assist
 - 🎯 **The right room, on time.** A house-wide **House Target** with per-room settings on top, occupancy-driven **Room Priority** and learned **Occupancy Trends** warm the office before you sit down and leave the guest room on its **Guardrail Band**.
 - 🌀 **Mix instead of over-condition.** When one room is too warm and another too cool, **Circulation** with the blower alone can equalize them for a fraction of the furnace's or compressor's energy.
 - 🌡️ **Comfort, not just dry-bulb.** **Effective Temperature** accounts for humidity; **Wet-Coil Lockout** keeps a wet evaporator from blowing moisture back into the rooms.
-- 🚪 **Openings that make sense.** An open window pauses the whole home; a closed **Interior Door** turns that into a local problem so the rest of the house keeps heating.
+- 🚪 **Openings that make sense.** An open window pauses heating and cooling for the whole home; a closed **Interior Door** turns that into a local problem so the rest of the house keeps heating.
 - 🧭 **Set up in minutes.** Pick the Central Thermostat, add rooms and sensors. Everything runs locally, no cloud.
 
 ## Screenshots
@@ -193,7 +193,7 @@ Two rooms at 24 °C do not feel the same at 40 % and 65 % relative humidity. Roo
 
 ### Exterior Openings and Interior Doors
 
-An **Exterior Opening** is a window or door to the outdoors: while it is open the plant pauses, because the envelope is no longer a closed system. An **Interior Door** is a door between two rooms: RoomMind uses it twice. As a sensor it can tell the plant that an open window is a local problem — with the default policy `pause_unless_door_closed`, a room whose own Interior Door is confirmed closed no longer pauses the whole home. And as physics, a shut door throttles the room's duct supply and its return path, so a closed room receives less of the blower's air.
+An **Exterior Opening** is a window or door to the outdoors: while it is open heating and cooling pause, because the envelope is no longer a closed system. Circulation does not: the blower only moves air, and with an opening it is what carries outdoor air through the house. An **Interior Door** is a door between two rooms: RoomMind uses it twice. As a sensor it can tell the plant that an open window is a local problem — with the default policy `pause_unless_door_closed`, a room whose own Interior Door is confirmed closed no longer pauses the whole home. And as physics, a shut door throttles the room's duct supply and its return path, so a closed room receives less of the blower's air.
 
 ### Whole-Home Coordinated Window Shades
 
