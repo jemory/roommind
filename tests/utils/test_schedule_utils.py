@@ -2554,7 +2554,10 @@ class TestHousePriceShift:
         )
 
     def test_house_hold_suppresses_the_price_shift_per_timestamp(self):
-        now = time.time()
+        # One minute into an hour slot: the signal's level only covers the slot it
+        # was built in, so a wall-clock `now` made the +120 s assertion flip in the
+        # last two minutes of every hour.
+        now = float(int(time.time() // 3600) * 3600 + 60)
         room = {"comfort_heat": 21.0, "comfort_cool": 24.0, "price_shift": 1.0}
         house = _house(price_shift=1.0, override_heat=22.0, override_until=now + 60)
         ctx = _house_ctx(house)
