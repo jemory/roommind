@@ -7,12 +7,13 @@ observed, so the first reading after startup or after the thermostat was
 unavailable never looks like a change either.
 
 Home Assistant state events carry no trace of who changed a setpoint, so the
-judgement is by value and time:
+judgement is by value:
 
 * a reading that differs from the previous one by more than the device's step
   is a candidate;
-* a candidate that matches a setpoint RoomMind sent within
-  ``ECHO_GRACE_SECONDS`` is RoomMind's own echo;
+* a candidate that matches the setpoint RoomMind last sent is its own
+  echo, however late the device reports it — a cloud thermostat can take
+  longer than a control cycle to show the change;
 * everything else was changed by a person, a device program, or an automation
   and becomes a Central Plant override until its configured expiry.
 """
@@ -28,7 +29,10 @@ from homeassistant.core import HomeAssistant
 
 from ..utils.temp_utils import ha_temp_to_celsius
 
-ECHO_GRACE_SECONDS = 75.0
+# How long a sent setpoint stays a candidate echo, and how many are kept.
+# A cloud thermostat can report commands late and out of order.
+ECHO_HISTORY_SECONDS = 1800.0
+ECHO_HISTORY_LIMIT = 8
 
 _UNAVAILABLE_STATES = ("unavailable", "unknown")
 
@@ -80,7 +84,7 @@ class ThermostatOverrideTracker:
     """Tells manual wall-thermostat setpoint changes apart from RoomMind echoes."""
 
     def __init__(self) -> None:
-        self._sent: dict[str, _SentSetpoint] = {}
+        self._sent: dict[str, list[_SentSetpoint]] = {}
         self._baseline: dict[str, _ObservedSetpoint] = {}
 
     def record_sent(
@@ -97,13 +101,17 @@ class ThermostatOverrideTracker:
         if not entity_id:
             return
         now = time.time() if now_ts is None else now_ts
-        self._sent[entity_id] = _SentSetpoint(
-            at=now,
-            single_c=_as_float(single_c),
-            low_c=_as_float(low_c),
-            high_c=_as_float(high_c),
-            hvac_mode=hvac_mode,
+        history = [s for s in self._sent.get(entity_id, []) if now - s.at <= ECHO_HISTORY_SECONDS]
+        history.append(
+            _SentSetpoint(
+                at=now,
+                single_c=_as_float(single_c),
+                low_c=_as_float(low_c),
+                high_c=_as_float(high_c),
+                hvac_mode=hvac_mode,
+            )
         )
+        self._sent[entity_id] = history[-ECHO_HISTORY_LIMIT:]
 
     def reset_baseline(self, entity_id: str) -> None:
         """Forget the last observation: the thermostat was unavailable and may come back changed."""
@@ -175,8 +183,10 @@ class ThermostatOverrideTracker:
 
         now = time.time() if now_ts is None else now_ts
         sent = self._sent.get(entity_id)
-        if sent is not None and now - sent.at <= ECHO_GRACE_SECONDS and self._matches_sent(sent, current, tolerance_c):
-            # Our own command coming back through the state machine.
+        if sent and any(self._matches_sent(s, current, tolerance_c) for s in sent):
+            # Our own command coming back through the state machine. The match is
+            # by value, not by age: a cloud thermostat can report the change
+            # minutes later, and a time window turned those echoes into overrides.
             self._baseline[entity_id] = current
             return None
 

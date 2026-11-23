@@ -9,10 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from homeassistant.const import UnitOfTemperature
 
-from custom_components.roommind.managers.thermostat_override_tracker import (
-    ECHO_GRACE_SECONDS,
-    ThermostatOverrideTracker,
-)
+from custom_components.roommind.managers.thermostat_override_tracker import ThermostatOverrideTracker
 
 CENTRAL = "climate.central"
 
@@ -380,18 +377,33 @@ def test_single_setpoint_echo_within_grace_is_ignored() -> None:
     assert _check(tracker, hass, _state(hass, "heat", temperature=23.0), now=1040.0) is None
 
 
-def test_echo_after_the_grace_window_is_external() -> None:
+def test_an_echo_is_ours_however_late_the_device_reports_it() -> None:
+    """A thermostat can take a long time to report what it was told.
+
+    The match used to expire 75 s after the send, so any control cycle longer
+    than that turned RoomMind's own nudge into a manual override.
+    """
     tracker, hass, _ = _setup()
     tracker.record_sent(CENTRAL, single_c=23.0, now_ts=1000.0)
-    result = _check(tracker, hass, _state(hass, "heat", temperature=23.0), now=1000.0 + ECHO_GRACE_SECONDS + 1)
+    assert _check(tracker, hass, _state(hass, "heat", temperature=23.0), now=1000.0 + 600) is None
+    # The echo became the new baseline, so a second look is still quiet.
+    assert _check(tracker, hass, _state(hass, "heat", temperature=23.0), now=1000.0 + 630) is None
+
+
+def test_an_echo_of_an_earlier_command_is_still_ours() -> None:
+    """A cloud device can report the commands out of order; either is our echo."""
+    tracker, hass, _ = _setup()
+    tracker.record_sent(CENTRAL, single_c=23.0, now_ts=1000.0)
+    tracker.record_sent(CENTRAL, single_c=24.0, now_ts=1030.0)
+    assert _check(tracker, hass, _state(hass, "heat", temperature=23.0), now=1060.0) is None
+
+
+def test_a_different_value_is_external_however_late_it_arrives() -> None:
+    tracker, hass, _ = _setup()
+    tracker.record_sent(CENTRAL, single_c=23.0, now_ts=1000.0)
+    result = _check(tracker, hass, _state(hass, "heat", temperature=25.0), now=1000.0 + 600)
     assert result is not None
-    assert result["plant_override_heat"] == 23.0
-
-
-def test_echo_at_the_grace_boundary_is_still_ignored() -> None:
-    tracker, hass, _ = _setup()
-    tracker.record_sent(CENTRAL, single_c=23.0, now_ts=1000.0)
-    assert _check(tracker, hass, _state(hass, "heat", temperature=23.0), now=1000.0 + ECHO_GRACE_SECONDS) is None
+    assert result["plant_override_heat"] == 25.0
 
 
 def test_a_different_value_is_not_an_echo() -> None:

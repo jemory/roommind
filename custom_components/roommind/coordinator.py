@@ -842,6 +842,12 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             now_ts=now,
         )
         if external:
+            running = settings.get("plant_override_until") if is_plant_override_active(settings) else None
+            if running is not None:
+                # A wall change while an override is already running refreshes its
+                # value but must not push the expiry out again: re-adoption would
+                # otherwise renew itself for as long as the thermostat kept moving.
+                external["plant_override_until"] = running
             await store.async_save_settings(external)
             settings = store.get_settings()
             plant_settings = get_central_plant_settings(settings)

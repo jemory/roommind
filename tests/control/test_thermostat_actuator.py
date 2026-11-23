@@ -877,6 +877,42 @@ class TestCacheAndTracker:
         assert tracker.check_external_change(hass, EID, state, {}, 21.0, now_ts=1010.0) is None
 
     @pytest.mark.asyncio
+    async def test_tracker_learns_the_clamped_setpoint_it_actually_sent(self) -> None:
+        """A thermostat at its ceiling gets a clamped command, and its echo is still ours.
+
+        The plan asks for one nudge above max_temp, so the value on the wire is
+        max_temp. Recording the plan instead missed the echo by a full degree and
+        RoomMind adopted its own command as a manual override.
+        """
+        hass = _hass_f()
+        state = _state(
+            state="heat",
+            unit="°F",
+            current=79.0,
+            min_temp=50.0,
+            max_temp=80.0,
+            step=1.0,
+            hvac_modes=SINGLE_HEAT_MODES,
+            fan_modes=["auto"],
+            supported_features=1,
+        )
+        tracker = ThermostatOverrideTracker()
+        await _apply(
+            ThermostatActuator(),
+            hass,
+            state,
+            MODE_HEATING,
+            override_tracker=tracker,
+            now_ts=1000.0,
+        )
+        sent = _service_data(hass, "set_temperature")[0]["temperature"]
+        assert sent == 80.0
+
+        # The device reports what it was given, one cycle later.
+        state.attributes["temperature"] = sent
+        assert tracker.check_external_change(hass, EID, state, {}, 21.0, now_ts=1030.0) is None
+
+    @pytest.mark.asyncio
     async def test_tracker_records_before_the_service_call_returns(self) -> None:
         hass = _hass()
         state = _state(

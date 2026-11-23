@@ -328,6 +328,38 @@ async def test_a_manual_wall_change_becomes_a_plant_override(harness: Harness, f
     assert data["rooms"]["living_room"]["heat_target"] == pytest.approx(22.0)
 
 
+async def test_a_second_wall_change_does_not_extend_the_override(harness: Harness, fake_states):
+    """Re-adoption updates the value but keeps the expiry of the override already running.
+
+    Each adoption used to take `now + thermostat_override_hours`, so an override
+    that kept matching the thermostat renewed itself for as long as the wall unit
+    kept moving.
+    """
+    until = time.time() + 900
+    coordinator = await harness.seed(
+        {"living_room": make_room()},
+        settings={
+            "central_plant": {"thermostat_entity": THERMOSTAT_ENTITY},
+            "plant_override_heat": 22.0,
+            "plant_override_cool": 26.0,
+            "plant_override_until": until,
+        },
+    )
+    attributes = dict(DEFAULT_THERMOSTAT_ATTRIBUTES)
+    attributes["target_temp_low"] = 18.0
+    attributes["target_temp_high"] = 24.0
+    fake_states.set(THERMOSTAT_ENTITY, "heat", attributes)
+    await harness.cycle()
+
+    # A second manual change while the first override is still running.
+    fake_states.set(THERMOSTAT_ENTITY, "heat", {**attributes, "target_temp_low": 23.0, "target_temp_high": 27.0})
+    await harness.cycle()
+
+    settings = coordinator.hass.data["roommind"]["store"].get_settings()
+    assert settings["plant_override_heat"] == pytest.approx(23.0)
+    assert settings["plant_override_until"] == pytest.approx(until)
+
+
 async def test_the_wall_change_echo_is_not_an_override(harness: Harness, fake_states):
     coordinator = await harness.seed({"living_room": make_room()})
     await harness.cycle()
